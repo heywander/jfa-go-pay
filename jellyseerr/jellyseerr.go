@@ -426,6 +426,13 @@ func (js *Jellyseerr) ApplyNotificationsTemplateToUser(jfID string, tmpl Notific
 }
 
 func (js *Jellyseerr) ModifyNotifications(jfID string, conf map[NotificationsField]any) error {
+	// Fix for API change: discord IDs are now stored as an array rather than as a single ID string
+	if v, ok := conf[FieldDiscord]; ok {
+		switch v.(type) {
+		case string:
+			conf[FieldDiscord] = []string{v.(string)}
+		}	
+	}
 	u, err := js.getUser(jfID)
 	if err != nil {
 		return err

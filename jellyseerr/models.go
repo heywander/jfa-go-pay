@@ -10,25 +10,26 @@ const (
 )
 
 type User struct {
-	UserTemplate                         // Note: You can set this with User.UserTemplate = value.
-	UserType                   int64     `json:"userType,omitempty"`
-	Warnings                   []any     `json:"warnings,omitempty"`
-	ID                         int64     `json:"id,omitempty"`
-	Email                      string    `json:"email,omitempty"`
-	PlexUsername               string    `json:"plexUsername,omitempty"`
-	JellyfinUsername           string    `json:"jellyfinUsername,omitempty"`
-	Username                   string    `json:"username,omitempty"`
-	RecoveryLinkExpirationDate any       `json:"recoveryLinkExpirationDate,omitempty"`
-	PlexID                     string    `json:"plexId,omitempty"`
-	JellyfinUserID             string    `json:"jellyfinUserId,omitempty"`
-	JellyfinDeviceID           string    `json:"jellyfinDeviceId,omitempty"`
-	JellyfinAuthToken          string    `json:"jellyfinAuthToken,omitempty"`
-	PlexToken                  string    `json:"plexToken,omitempty"`
-	Avatar                     string    `json:"avatar,omitempty"`
-	CreatedAt                  time.Time `json:"createdAt,omitempty"`
-	UpdatedAt                  time.Time `json:"updatedAt,omitempty"`
-	RequestCount               int64     `json:"requestCount,omitempty"`
-	DisplayName                string    `json:"displayName,omitempty"`
+	UserTemplate                             // Note: You can set this with User.UserTemplate = value.
+	UserType                   int64         `json:"userType,omitempty"`
+	Warnings                   []any         `json:"warnings,omitempty"`
+	ID                         int64         `json:"id,omitempty"`
+	Email                      string        `json:"email,omitempty"`
+	PlexUsername               string        `json:"plexUsername,omitempty"`
+	JellyfinUsername           string        `json:"jellyfinUsername,omitempty"`
+	Username                   string        `json:"username,omitempty"`
+	RecoveryLinkExpirationDate any           `json:"recoveryLinkExpirationDate,omitempty"`
+	PlexID                     string        `json:"plexId,omitempty"`
+	JellyfinUserID             string        `json:"jellyfinUserId,omitempty"`
+	JellyfinDeviceID           string        `json:"jellyfinDeviceId,omitempty"`
+	JellyfinAuthToken          string        `json:"jellyfinAuthToken,omitempty"`
+	PlexToken                  string        `json:"plexToken,omitempty"`
+	Avatar                     string        `json:"avatar,omitempty"`
+	CreatedAt                  time.Time     `json:"createdAt,omitempty"`
+	UpdatedAt                  time.Time     `json:"updatedAt,omitempty"`
+	RequestCount               int64         `json:"requestCount,omitempty"`
+	DisplayName                string        `json:"displayName,omitempty"`
+	Settings                   *UserSettings `json:"settings,omitempty"`
 }
 
 func (u User) Name() string {
@@ -42,6 +43,13 @@ func (u User) Name() string {
 		n += " (" + u.DisplayName + ")"
 	}
 	return n
+}
+
+// Fields have been omitted (those I know not the type of)
+type UserSettings struct {
+	ID     int64  `json:"id,omitempty"`
+	Locale string `json:"locale,omitempty"`
+	NotificationsSettings
 }
 
 type UserTemplate struct {
@@ -88,7 +96,7 @@ type NotificationTypes struct {
 type NotificationsField string
 
 const (
-	FieldDiscord         NotificationsField = "discordId"
+	FieldDiscord         NotificationsField = "discordIds"
 	FieldTelegram        NotificationsField = "telegramChatId"
 	FieldEmailEnabled    NotificationsField = "emailEnabled"
 	FieldDiscordEnabled  NotificationsField = "discordEnabled"
@@ -97,12 +105,16 @@ const (
 
 type Notifications struct {
 	NotificationsTemplate
-	PgpKey                   any    `json:"pgpKey,omitempty"`
-	DiscordID                string `json:"discordId,omitempty"`
-	PushbulletAccessToken    any    `json:"pushbulletAccessToken,omitempty"`
-	PushoverApplicationToken any    `json:"pushoverApplicationToken,omitempty"`
-	PushoverUserKey          any    `json:"pushoverUserKey,omitempty"`
-	TelegramChatID           string `json:"telegramChatId,omitempty"`
+	NotificationsSettings
+}
+
+type NotificationsSettings struct {
+	PgpKey                   any      `json:"pgpKey,omitempty"`
+	DiscordIDs               []string `json:"discordIds,omitempty"`
+	PushbulletAccessToken    any      `json:"pushbulletAccessToken,omitempty"`
+	PushoverApplicationToken any      `json:"pushoverApplicationToken,omitempty"`
+	PushoverUserKey          any      `json:"pushoverUserKey,omitempty"`
+	TelegramChatID           string   `json:"telegramChatId,omitempty"`
 }
 
 type NotificationsTemplate struct {

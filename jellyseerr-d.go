@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,7 +46,7 @@ func (app *appContext) SynchronizeJellyseerrUser(jfID string) {
 	}
 	if discordEnabled {
 		dcUser, ok := app.storage.GetDiscordKey(jfID)
-		if ok && dcUser.ID != "" && notif.DiscordID != dcUser.ID {
+		if ok && dcUser.ID != "" && !slices.Contains(notif.DiscordIDs, dcUser.ID) {
 			contactMethods[jellyseerr.FieldDiscord] = dcUser.ID
 			contactMethods[jellyseerr.FieldDiscordEnabled] = dcUser.Contact
 		}
