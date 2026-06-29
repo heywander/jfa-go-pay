@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,27 @@ import (
 var cssVersion string
 var css = []string{cssVersion + "bundle.css", "remixicon.css"}
 var cssHeader string
+
+func loadCSSVersionFallback() {
+	if cssVersion == "" {
+		entries, err := fs.ReadDir(localFS, "web/css")
+		if err == nil {
+			versions := []string{}
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.IsDir() || !strings.HasSuffix(name, "bundle.css") || name == "bundle.css" {
+					continue
+				}
+				versions = append(versions, strings.TrimSuffix(name, "bundle.css"))
+			}
+			if len(versions) > 0 {
+				sort.Strings(versions)
+				cssVersion = versions[len(versions)-1]
+			}
+		}
+	}
+	css = []string{cssVersion + "bundle.css", "remixicon.css"}
+}
 
 func (app *appContext) loadCSSHeader() string {
 	l := len(css)
@@ -246,6 +268,7 @@ func (app *appContext) AdminPage(gc *gin.Context) {
 		"jfAllowAll":       jfAllowAll,
 		"userPageEnabled":  app.config.Section("user_page").Key("enabled").MustBool(false),
 		"showUserPageLink": app.config.Section("user_page").Key("show_link").MustBool(true),
+		"stripeEnabled":    stripeEnabled,
 		"loginAppearance":  app.config.Section("ui").Key("login_appearance").MustString("clear"),
 	})
 }
@@ -904,12 +927,8 @@ func (app *appContext) NoRouteHandler(gc *gin.Context) {
 func (app *appContext) StorePage(gc *gin.Context) {
 	lang := app.storage.lang.chosenUserLang
 	app.gcHTML(gc, 200, "store.html", OtherPage, lang, gin.H{
-		"strings":        app.storage.lang.User[lang].Strings,
-		"urlBase":        app.config.Section("ui").Key("jfa_url").String(),
-		"priceMonthly":   fmt.Sprintf("%.2f", float64(app.config.Section("stripe").Key("price_monthly").MustInt64(200))/100.0),
-		"currency":       strings.ToUpper(app.config.Section("stripe").Key("price_currency").MustString("usd")),
-		"stripeEnabled": stripeEnabled,
-		"btcpayEnabled": btcpayEnabled,
+		"strings": app.storage.lang.User[lang].Strings,
+		"plans":   storePlanViews(app.publicPaymentPlans()),
 	})
 }
 

@@ -11,7 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	lm "github.com/hrfee/jfa-go/logmessages"
-	"github.com/stripe/stripe-go/v79"
+	"github.com/stripe/stripe-go/v86"
+	chargeapi "github.com/stripe/stripe-go/v86/charge"
 )
 
 // @Summary Create a checkout session for an existing invite (Pay-to-Unlock).
@@ -41,16 +42,45 @@ func (app *appContext) PostStripeCheckout(gc *gin.Context) {
 	successURL := fmt.Sprintf("%s/invite/%s?success=payment", baseURL, code)
 	cancelURL := fmt.Sprintf("%s/invite/%s?canceled=payment", baseURL, code)
 
-	url, err := CreateCheckoutSession(code, inv.PriceAmount, inv.PriceCurrency, successURL, cancelURL, nil, "")
+	metadata := app.stripePaymentMetadata(map[string]string{
+		stripeMetadataFlow:       stripeMetadataFlowInviteUnlock,
+		stripeMetadataInviteCode: code,
+		stripeMetadataEmail:      inv.SendTo,
+		stripeMetadataPlan:       "Invite",
+		stripeMetadataProfile:    inv.Profile,
+	})
+
+	session, err := CreateCheckoutSession(code, inv.PriceAmount, inv.PriceCurrency, "Invite Code: "+code, successURL, cancelURL, metadata, "", 0)
 	if err != nil {
 		app.err.Printf(lm.FailedCreateCheckoutSession, err)
 		respond(500, "Failed to create checkout session", gc)
 		return
 	}
 
+	app.setPayment(session.ID, func(payment *Payment) {
+		payment.Provider = lm.Stripe
+		payment.InstanceID = metadata[stripeMetadataInstanceID]
+		payment.ProviderPaymentID = session.ID
+		payment.ProviderLiveMode = session.Livemode
+		if session.Customer != nil {
+			payment.CustomerID = session.Customer.ID
+		}
+		payment.TargetEmail = inv.SendTo
+		payment.Plan = "Invite"
+		payment.Profile = inv.Profile
+		payment.Amount = inv.PriceAmount
+		payment.Currency = inv.PriceCurrency
+		payment.Status = paymentStatusCheckoutCreated
+		payment.EmailStatus = paymentEmailNotApplicable
+		payment.InviteCode = code
+		if session.Created > 0 {
+			payment.Created = time.Unix(session.Created, 0)
+		}
+	})
+
 	gc.SetCookie("jfa_payment_lock", code, 3600*24, "/", "", false, true)
 
-	gc.JSON(200, stringResponse{Response: url})
+	gc.JSON(200, stringResponse{Response: session.URL})
 }
 
 type createCheckoutDTO struct {
@@ -75,39 +105,19 @@ func (app *appContext) PostStripeCreateCheckout(gc *gin.Context) {
 		return
 	}
 
-	var priceAmount int64
-	var interval string
-	var profileName = "Default"
-
-	// Double-billing prevention for subscription plans
-	if req.Plan == "Monthly" {
-		if userID, _, found := app.findUserByEmail(req.Email); found {
-			user, err := app.jf.UserByID(userID, false)
-			if err == nil && !user.Policy.IsDisabled {
-				expiry := time.Now()
-				if userExpiry, ok := app.storage.GetUserExpiryKey(userID); ok {
-					expiry = userExpiry.Expiry
-				}
-				if expiry.After(time.Now()) {
-					app.info.Printf(lm.StripeBlockedDuplicate, userID, req.Email)
-					respond(409, "You already have an active subscription.", gc)
-					return
-				}
-			}
-		}
+	plan, ok := app.paymentPlanByID(req.Plan)
+	if !ok || !plan.Enabled {
+		respond(400, "Invalid payment plan", gc)
+		return
 	}
 
-	currency := app.config.Section("stripe").Key("price_currency").MustString("usd")
-	priceStandard := app.config.Section("stripe").Key("price_standard").MustInt64(500)
-	priceMonthly := app.config.Section("stripe").Key("price_monthly").MustInt64(200)
-
-	if req.Plan == "Monthly" {
-		priceAmount = priceMonthly
-		interval = "month"
-	} else {
-		req.Plan = "Standard"
-		priceAmount = priceStandard
-		interval = ""
+	// Double-billing prevention for subscription plans
+	if plan.Recurring {
+		if userID, active := app.userHasActivePaidExpiry(req.Email); active {
+			app.info.Printf(lm.StripeBlockedDuplicate, userID, req.Email)
+			respond(409, "You already have an active subscription.", gc)
+			return
+		}
 	}
 
 	refID := "purchase-" + strconv.FormatInt(time.Now().Unix(), 10)
@@ -116,20 +126,37 @@ func (app *appContext) PostStripeCreateCheckout(gc *gin.Context) {
 	successURL := fmt.Sprintf("%s/payment/success", baseURL)
 	cancelURL := fmt.Sprintf("%s/store?canceled=true", baseURL)
 
-	metadata := map[string]string{
-		"target_email": req.Email,
-		"plan":         req.Plan,
-		"profile":      profileName,
-	}
+	metadata := app.stripePaymentMetadata(plan.metadata())
+	metadata[stripeMetadataFlow] = stripeMetadataFlowStorePurchase
+	metadata[stripeMetadataEmail] = req.Email
 
-	url, err := CreateCheckoutSession(refID, priceAmount, currency, successURL, cancelURL, metadata, interval)
+	session, err := CreateCheckoutSession(refID, plan.Price, plan.Currency, plan.Name, successURL, cancelURL, metadata, plan.StripeInterval, plan.StripeIntervalCount)
 	if err != nil {
 		app.err.Printf(lm.FailedCreateCheckoutSession, err)
 		respond(500, "Failed to create checkout session", gc)
 		return
 	}
 
-	gc.JSON(200, stringResponse{Response: url})
+	app.setPayment(session.ID, func(payment *Payment) {
+		payment.Provider = lm.Stripe
+		payment.InstanceID = metadata[stripeMetadataInstanceID]
+		payment.ProviderPaymentID = session.ID
+		payment.ProviderLiveMode = session.Livemode
+		if session.Customer != nil {
+			payment.CustomerID = session.Customer.ID
+		}
+		payment.TargetEmail = req.Email
+		paymentPlanSnapshotFromMetadata(metadata).apply(payment)
+		payment.Amount = plan.Price
+		payment.Currency = plan.Currency
+		payment.Status = paymentStatusCheckoutCreated
+		payment.EmailStatus = paymentEmailNotStarted
+		if session.Created > 0 {
+			payment.Created = time.Unix(session.Created, 0)
+		}
+	})
+
+	gc.JSON(200, stringResponse{Response: session.URL})
 }
 
 // @Summary Handle Stripe Webhooks
@@ -151,7 +178,7 @@ func (app *appContext) StripeWebhook(gc *gin.Context) {
 
 	sigHeader := gc.GetHeader("Stripe-Signature")
 	webhookSecret := strings.TrimSpace(app.config.Section("stripe").Key("webhook_secret").String())
-	verifySignature := app.config.Section("stripe").Key("verify_signature").MustBool(false)
+	verifySignature := app.config.Section("stripe").Key("verify_signature").MustBool(true)
 
 	if !verifySignature {
 		app.debug.Println(lm.StripeSignatureBypass)
@@ -163,12 +190,25 @@ func (app *appContext) StripeWebhook(gc *gin.Context) {
 		gc.AbortWithStatus(400)
 		return
 	}
+	app.info.Printf("Stripe webhook received: %s (%s)", event.Type, event.ID)
 
 	switch event.Type {
 	case "checkout.session.completed":
 		app.handleStripeCheckoutCompleted(event)
+	case "checkout.session.expired":
+		app.handleStripeCheckoutExpired(event)
 	case "invoice.payment_succeeded":
 		app.handleStripeInvoiceSucceeded(event)
+	case "invoice.payment_failed", "invoice.marked_uncollectible", "invoice.voided":
+		app.handleStripeInvoicePaymentFailed(event)
+	case "payment_intent.canceled", "payment_intent.payment_failed", "payment_intent.succeeded":
+		app.handleStripePaymentIntentUpdated(event)
+	case "charge.refunded", "charge.updated", "charge.failed":
+		app.handleStripeChargeUpdated(event)
+	case "refund.created", "refund.updated":
+		app.handleStripeRefundUpdated(event)
+	case "customer.subscription.updated":
+		app.handleStripeSubscriptionUpdated(event)
 	case "customer.subscription.deleted":
 		app.handleStripeSubscriptionDeleted(event)
 	}
@@ -185,112 +225,84 @@ func (app *appContext) handleStripeCheckoutCompleted(event *stripe.Event) {
 
 	refID := session.ClientReferenceID
 	metadata := session.Metadata
-
-	targetEmail, ok := metadata["target_email"]
-	if !ok {
-		// Legacy pay-to-unlock flow
-		app.info.Printf(lm.StripePaymentOldInvite, refID)
-		if inv, ok := app.storage.GetInvitesKey(refID); ok {
-			inv.PaymentStatus = "paid"
-			app.storage.SetInvitesKey(refID, inv)
-		}
-		return
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	subscriptionID := ""
+	if session.Subscription != nil {
+		subscriptionID = session.Subscription.ID
 	}
 
-	app.info.Printf(lm.StripePaymentReceived, metadata["plan"], targetEmail)
-
-	existingUserID, existingEmail, found := app.findUserByEmail(targetEmail)
-	if found {
-		app.info.Printf(lm.ExistingUserFound, targetEmail, existingUserID)
-
-		if subscriptionID := session.Subscription; subscriptionID != nil {
-			existingEmail.Label = "Stripe Subscription: " + subscriptionID.ID
-		} else {
-			existingEmail.Label = "Purchased via Store"
+	app.setPayment(session.ID, func(payment *Payment) {
+		applyStripeSessionToPayment(firstNonEmpty(metadata[stripeMetadataInstanceID], app.paymentInstanceID()), &session, payment)
+		paymentPlanSnapshotFromMetadata(metadata).apply(payment)
+		if subscriptionID != "" {
+			payment.SubscriptionID = subscriptionID
 		}
-		app.storage.SetEmailsKey(existingUserID, existingEmail)
+		payment.Status = paymentStatusPaid
+		payment.PaidAt = time.Now()
+	})
 
-		expiry := time.Now()
-		lastTx := ""
-		if userExpiry, ok := app.storage.GetUserExpiryKey(existingUserID); ok {
-			expiry = userExpiry.Expiry
-			lastTx = userExpiry.LastTransactionID
-		}
-
-		if lastTx == session.ID {
-			app.info.Printf(lm.StripeSessionAlreadyProcessed, session.ID, existingUserID)
+	if stripeSessionIsInviteUnlock(metadata) {
+		if app.fulfillStripeInviteUnlock(session.ID, refID, metadata) {
 			return
 		}
-
-		if expiry.Before(time.Now()) {
-			expiry = time.Now()
-		}
-		var newExpiry time.Time
-		if metadata["plan"] == "Monthly" {
-			newExpiry = expiry.AddDate(0, 1, 0)
-		} else {
-			newExpiry = expiry.AddDate(10, 0, 0)
-		}
-		app.storage.SetUserExpiryKey(existingUserID, UserExpiry{Expiry: newExpiry, LastTransactionID: session.ID})
-
-		if paramsUser, err := app.jf.UserByID(existingUserID, false); err == nil {
-			if err, _, _ = app.SetUserDisabled(paramsUser, false); err != nil {
-				app.err.Printf(lm.FailedReEnableUser, existingUserID, err)
-			}
-			app.InvalidateUserCaches()
-		}
-
-		app.info.Printf(lm.UserReactivated, existingUserID, newExpiry)
+		app.setPayment(session.ID, func(payment *Payment) {
+			payment.Status = paymentStatusNeedsReview
+			payment.Error = "Stripe invite unlock is paid, but the local invite could not be found"
+		})
 		return
 	}
 
-	// New user: generate invite
-	inviteCode := GenerateInviteCode()
-	profile := metadata["profile"]
-	if profile == "" {
-		profile = "Default"
-	}
-	if _, ok := app.storage.GetProfileKey(profile); !ok {
-		app.debug.Printf(lm.FailedGetProfile, profile)
-		profile = "Default"
+	targetEmail, ok := metadata[stripeMetadataEmail]
+	if !ok {
+		// Legacy pay-to-unlock flow
+		app.fulfillStripeInviteUnlock(session.ID, refID, metadata)
+		return
 	}
 
-	invite := Invite{
-		Code:          inviteCode,
-		Created:       time.Now(),
-		Label:         "Purchased by " + targetEmail,
-		UserLabel:     "Purchased via Store",
-		RemainingUses: 1,
-		Profile:       profile,
-		SendTo:        targetEmail,
+	snapshot := paymentPlanSnapshotFromMetadata(metadata)
+	plan := snapshot.Name
+	app.info.Printf(lm.StripePaymentReceived, plan, targetEmail)
+
+	app.setPayment(session.ID, func(payment *Payment) {
+		payment.TargetEmail = targetEmail
+		snapshot.apply(payment)
+	})
+
+	result := app.fulfillStorePayment(paymentFulfillment{
+		Provider:            lm.Stripe,
+		TransactionID:       session.ID,
+		SubscriptionID:      subscriptionID,
+		TargetEmail:         targetEmail,
+		PlanID:              snapshot.ID,
+		Plan:                plan,
+		Profile:             snapshot.Profile,
+		AccessMonths:        snapshot.AccessMonths,
+		AccessDays:          snapshot.AccessDays,
+		Recurring:           snapshot.Recurring,
+		StripeInterval:      snapshot.StripeInterval,
+		StripeIntervalCount: snapshot.StripeIntervalCount,
+	})
+	app.markPaymentFulfilled(session.ID, result)
+	if result.ShouldSendInvite {
+		app.sendPurchasedInvite(result.Invite, targetEmail, session.ID)
+	} else if result.InviteCode != "" {
+		app.markPaymentEmail(session.ID, paymentEmailDisabled, "")
+	}
+}
+
+func (app *appContext) handleStripeCheckoutExpired(event *stripe.Event) {
+	var session stripe.CheckoutSession
+	if err := json.Unmarshal(event.Data.Raw, &session); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
 	}
 
-	if metadata["plan"] == "Monthly" {
-		invite.ValidTill = time.Now().AddDate(0, 1, 0)
-		invite.UserExpiry = true
-		invite.UserMonths = 1
-	} else {
-		invite.ValidTill = time.Now().AddDate(10, 0, 0)
-		invite.UserExpiry = false
-	}
-
-	app.storage.SetInvitesKey(inviteCode, invite)
-	app.info.Printf(lm.GeneratedInviteForPurchase, inviteCode, targetEmail)
-
-	if emailEnabled {
-		go func(inv Invite, tEmail string) {
-			msg, err := app.email.constructInvite(&inv, false)
-			if err != nil {
-				app.err.Printf(lm.FailedConstructInviteMessage, tEmail, err)
-				return
-			}
-			if err = app.email.send(msg, tEmail); err != nil {
-				app.err.Printf(lm.FailedSendInviteMessage, inv.Code, tEmail, err)
-			} else {
-				app.info.Printf(lm.SentInviteMessage, inv.Code, tEmail)
-			}
-		}(invite, targetEmail)
-	}
+	app.setPayment(session.ID, func(payment *Payment) {
+		applyStripeSessionToPayment(firstNonEmpty(session.Metadata[stripeMetadataInstanceID], app.paymentInstanceID()), &session, payment)
+		setPaymentLifecycleStatus(payment, paymentStatusCheckoutExpired, "Stripe checkout session expired")
+	})
 }
 
 func (app *appContext) handleStripeInvoiceSucceeded(event *stripe.Event) {
@@ -303,7 +315,46 @@ func (app *appContext) handleStripeInvoiceSucceeded(event *stripe.Event) {
 	if invoice.BillingReason != stripe.InvoiceBillingReasonSubscriptionCycle {
 		return
 	}
+
+	subscriptionID := ""
+	instanceID := app.paymentInstanceID()
+	metadata := map[string]string{}
+	if invoice.Parent != nil &&
+		invoice.Parent.SubscriptionDetails != nil &&
+		invoice.Parent.SubscriptionDetails.Subscription != nil {
+		subscriptionID = invoice.Parent.SubscriptionDetails.Subscription.ID
+		if invoice.Parent.SubscriptionDetails.Metadata != nil {
+			metadata = invoice.Parent.SubscriptionDetails.Metadata
+			if metadataInstanceID := invoice.Parent.SubscriptionDetails.Metadata[stripeMetadataInstanceID]; metadataInstanceID != "" {
+				instanceID = metadataInstanceID
+			}
+		}
+	}
+	planSnapshot := app.paymentPlanSnapshotForSubscription(subscriptionID, metadata)
+	app.setPayment(invoice.ID, func(payment *Payment) {
+		payment.Provider = lm.Stripe
+		payment.InstanceID = instanceID
+		payment.ProviderPaymentID = invoice.ID
+		applyStripeInvoiceToPayment(&invoice, payment)
+		planSnapshot.apply(payment)
+		payment.SubscriptionID = subscriptionID
+		payment.TargetEmail = invoice.CustomerEmail
+		if payment.Plan == "" {
+			payment.Plan = paymentPlanMonthly
+		}
+		payment.Status = paymentStatusPaid
+		payment.EmailStatus = paymentEmailNotApplicable
+		if invoice.Created > 0 {
+			created := time.Unix(invoice.Created, 0)
+			payment.Created = created
+			payment.PaidAt = created
+		} else {
+			payment.PaidAt = time.Now()
+		}
+	})
+
 	if invoice.CustomerEmail == "" {
+		app.markPaymentError(invoice.ID, fmt.Sprintf("invoice %s has no customer email", invoice.ID))
 		app.err.Printf(lm.FailedFindUserByEmail, fmt.Sprintf("invoice %s (no email)", invoice.ID))
 		return
 	}
@@ -313,29 +364,165 @@ func (app *appContext) handleStripeInvoiceSucceeded(event *stripe.Event) {
 
 	userID, _, found := app.findUserByEmail(email)
 	if !found {
+		app.markPaymentError(invoice.ID, fmt.Sprintf("could not find user with email %s", email))
 		app.err.Printf(lm.FailedFindUserByEmail, email)
 		return
 	}
 
-	expiry := time.Now()
-	if userExpiry, ok := app.storage.GetUserExpiryKey(userID); ok {
-		expiry = userExpiry.Expiry
+	newExpiry, changed := app.extendPaidUserExpiry(userID, invoice.ID, planSnapshot.Name, planSnapshot.AccessMonths, planSnapshot.AccessDays)
+	if !changed {
+		app.info.Printf(lm.PaymentTransactionAlreadyProcessed, lm.Stripe, invoice.ID, userID)
+		app.markPaymentFulfilled(invoice.ID, paymentFulfillmentResult{JellyfinID: userID})
+		return
 	}
-	if expiry.Before(time.Now()) {
-		expiry = time.Now()
-	}
-	newExpiry := expiry.AddDate(0, 1, 0)
-
-	app.storage.SetUserExpiryKey(userID, UserExpiry{Expiry: newExpiry})
-
-	if paramsUser, err := app.jf.UserByID(userID, false); err == nil {
-		if err, _, _ = app.SetUserDisabled(paramsUser, false); err != nil {
-			app.err.Printf(lm.FailedReEnableUser, userID, err)
-		}
-		app.InvalidateUserCaches()
-	}
+	app.reEnablePaidUser(userID)
+	app.markPaymentFulfilled(invoice.ID, paymentFulfillmentResult{JellyfinID: userID})
 
 	app.info.Printf(lm.UserExpiryExtended, userID, email, newExpiry)
+}
+
+func (app *appContext) handleStripeInvoicePaymentFailed(event *stripe.Event) {
+	var invoice stripe.Invoice
+	if err := json.Unmarshal(event.Data.Raw, &invoice); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
+	}
+
+	subscriptionID := stripeInvoiceSubscriptionID(&invoice)
+	instanceID := app.paymentInstanceID()
+	metadata := map[string]string{}
+	if invoice.Parent != nil && invoice.Parent.SubscriptionDetails != nil && invoice.Parent.SubscriptionDetails.Metadata != nil {
+		metadata = invoice.Parent.SubscriptionDetails.Metadata
+		if metadataInstanceID := invoice.Parent.SubscriptionDetails.Metadata[stripeMetadataInstanceID]; metadataInstanceID != "" {
+			instanceID = metadataInstanceID
+		}
+	}
+	planSnapshot := app.paymentPlanSnapshotForSubscription(subscriptionID, metadata)
+
+	app.setPayment(invoice.ID, func(payment *Payment) {
+		payment.Provider = lm.Stripe
+		payment.InstanceID = instanceID
+		payment.ProviderPaymentID = invoice.ID
+		payment.EmailStatus = paymentEmailNotApplicable
+		planSnapshot.apply(payment)
+		if payment.Plan == "" {
+			payment.Plan = paymentPlanMonthly
+		}
+		applyStripeInvoiceToPayment(&invoice, payment)
+		if subscriptionID != "" {
+			payment.SubscriptionID = subscriptionID
+		}
+	})
+	if subscriptionID != "" {
+		app.setPaymentsByStripeIDs("", "", "", subscriptionID, func(payment *Payment) {
+			applyStripeInvoiceToPayment(&invoice, payment)
+		})
+	}
+}
+
+func (app *appContext) handleStripePaymentIntentUpdated(event *stripe.Event) {
+	var paymentIntent stripe.PaymentIntent
+	if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
+	}
+
+	chargeID := stripePaymentIntentChargeID(&paymentIntent)
+	app.setPaymentsByStripeIDs(paymentIntent.ID, chargeID, "", "", func(payment *Payment) {
+		applyStripePaymentIntentToPayment(&paymentIntent, payment)
+	})
+}
+
+func (app *appContext) handleStripeChargeUpdated(event *stripe.Event) {
+	var charge stripe.Charge
+	if err := json.Unmarshal(event.Data.Raw, &charge); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
+	}
+
+	app.applyStripeChargeEvent(&charge)
+}
+
+func (app *appContext) handleStripeRefundUpdated(event *stripe.Event) {
+	var refund stripe.Refund
+	if err := json.Unmarshal(event.Data.Raw, &refund); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
+	}
+
+	chargeID := ""
+	if refund.Charge != nil {
+		chargeID = refund.Charge.ID
+	}
+	if chargeID != "" {
+		if charge, err := chargeapi.Get(chargeID, nil); err == nil {
+			app.applyStripeChargeEvent(charge)
+			return
+		}
+	}
+
+	paymentIntentID := ""
+	if refund.PaymentIntent != nil {
+		paymentIntentID = refund.PaymentIntent.ID
+	}
+	app.setPaymentsByStripeIDs(paymentIntentID, chargeID, "", "", func(payment *Payment) {
+		applyStripeRefundToPayment(&refund, payment)
+	})
+}
+
+func (app *appContext) applyStripeChargeEvent(charge *stripe.Charge) {
+	if charge == nil {
+		return
+	}
+	paymentIntentID := ""
+	if charge.PaymentIntent != nil {
+		paymentIntentID = charge.PaymentIntent.ID
+	}
+	app.setPaymentsByStripeIDs(paymentIntentID, charge.ID, "", "", func(payment *Payment) {
+		applyStripeChargeToPayment(charge, payment)
+	})
+}
+
+func applyStripeRefundToPayment(refund *stripe.Refund, payment *Payment) {
+	if refund == nil || refund.ID == "" {
+		return
+	}
+	if refund.PaymentIntent != nil {
+		payment.PaymentIntentID = refund.PaymentIntent.ID
+	}
+	if refund.Charge != nil {
+		payment.ChargeID = refund.Charge.ID
+	}
+	if refund.Currency != "" {
+		payment.Currency = string(refund.Currency)
+	}
+	if refund.Status != stripe.RefundStatusSucceeded && refund.Status != stripe.RefundStatusPending {
+		return
+	}
+	if refund.Amount > payment.RefundedAmount {
+		payment.RefundedAmount = refund.Amount
+	}
+	if payment.Amount > 0 && payment.RefundedAmount >= payment.Amount {
+		setPaymentLifecycleStatus(payment, paymentStatusRefunded, "")
+		return
+	}
+	setPaymentLifecycleStatus(payment, paymentStatusPartiallyRefunded, "")
+}
+
+func (app *appContext) handleStripeSubscriptionUpdated(event *stripe.Event) {
+	var sub stripe.Subscription
+	if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+		app.err.Printf(lm.StripeWebhookError, err)
+		return
+	}
+
+	app.applyStripeSubscriptionEvent(&sub)
+	if sub.CancelAtPeriodEnd || sub.Status == stripe.SubscriptionStatusCanceled {
+		app.notifyStripeSubscriptionCancellation(&sub, "stripe")
+	}
+	if sub.Status == stripe.SubscriptionStatusCanceled {
+		app.expireStripeSubscriptionUser(&sub)
+	}
 }
 
 func (app *appContext) handleStripeSubscriptionDeleted(event *stripe.Event) {
@@ -345,21 +532,57 @@ func (app *appContext) handleStripeSubscriptionDeleted(event *stripe.Event) {
 		return
 	}
 
-	targetEmail := sub.Metadata["target_email"]
+	app.applyStripeSubscriptionEvent(&sub)
+	app.notifyStripeSubscriptionCancellation(&sub, "stripe")
+	targetEmail := stripeSubscriptionTargetEmail(&sub, app)
 	if targetEmail == "" {
 		app.debug.Printf(lm.StripeSubscriptionDeleted, sub.ID, "unknown (no metadata)")
 		return
 	}
 
 	app.info.Printf(lm.StripeSubscriptionDeleted, sub.ID, targetEmail)
+	app.expireStripeSubscriptionUser(&sub)
+}
 
+func (app *appContext) applyStripeSubscriptionEvent(sub *stripe.Subscription) {
+	if sub == nil || sub.ID == "" {
+		return
+	}
+	found := app.setPaymentsByStripeIDs("", "", "", sub.ID, func(payment *Payment) {
+		applyStripeSubscriptionToPayment(sub, payment)
+	})
+	if found || !stripeSubscriptionMatchesInstance(app.paymentInstanceID(), sub) {
+		return
+	}
+	targetEmail := stripeSubscriptionTargetEmail(sub, app)
+	if targetEmail == "" {
+		return
+	}
+	app.setPayment("subscription-"+sub.ID, func(payment *Payment) {
+		payment.Provider = lm.Stripe
+		payment.InstanceID = app.paymentInstanceID()
+		payment.ProviderPaymentID = sub.ID
+		payment.EmailStatus = paymentEmailNotApplicable
+		app.paymentPlanSnapshotForSubscription(sub.ID, sub.Metadata).apply(payment)
+		if payment.Plan == "" {
+			payment.Plan = paymentPlanMonthly
+		}
+		applyStripeSubscriptionToPayment(sub, payment)
+	})
+}
+
+func (app *appContext) expireStripeSubscriptionUser(sub *stripe.Subscription) {
+	targetEmail := stripeSubscriptionTargetEmail(sub, app)
+	if targetEmail == "" {
+		return
+	}
 	userID, _, found := app.findUserByEmail(targetEmail)
 	if !found {
 		app.err.Printf(lm.FailedFindUserByEmail, targetEmail)
 		return
 	}
 
-	app.storage.SetUserExpiryKey(userID, UserExpiry{Expiry: time.Now().Add(-1 * time.Second)})
+	app.expirePaidUserNow(userID)
 
 	if paramsUser, err := app.jf.UserByID(userID, false); err == nil {
 		if err, _, _ = app.SetUserDisabled(paramsUser, true); err != nil {
@@ -369,4 +592,26 @@ func (app *appContext) handleStripeSubscriptionDeleted(event *stripe.Event) {
 		}
 		app.InvalidateUserCaches()
 	}
+}
+
+func stripeSubscriptionTargetEmail(sub *stripe.Subscription, app *appContext) string {
+	if sub != nil && sub.Metadata != nil && sub.Metadata[stripeMetadataEmail] != "" {
+		return sub.Metadata[stripeMetadataEmail]
+	}
+	if sub != nil {
+		for _, payment := range app.storage.GetPayments() {
+			if payment.SubscriptionID == sub.ID && payment.TargetEmail != "" {
+				return payment.TargetEmail
+			}
+		}
+	}
+	return ""
+}
+
+func stripeSubscriptionMatchesInstance(instanceID string, sub *stripe.Subscription) bool {
+	if sub == nil || sub.Metadata == nil {
+		return false
+	}
+	return sub.Metadata[stripeMetadataSource] == stripeMetadataSourceJFA &&
+		sub.Metadata[stripeMetadataInstanceID] == instanceID
 }

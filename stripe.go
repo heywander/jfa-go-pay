@@ -4,17 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/stripe/stripe-go/v79"
-	"github.com/stripe/stripe-go/v79/checkout/session"
-	stripeEvent "github.com/stripe/stripe-go/v79/event"
-	"github.com/stripe/stripe-go/v79/webhook"
+	"github.com/stripe/stripe-go/v86"
+	"github.com/stripe/stripe-go/v86/checkout/session"
+	stripeEvent "github.com/stripe/stripe-go/v86/event"
+	"github.com/stripe/stripe-go/v86/webhook"
 )
+
+const supportedStripeWebhookAPIVersion = "2026-06-24.dahlia"
 
 func InitStripe(apiKey string) {
 	stripe.Key = apiKey
 }
 
-func CreateCheckoutSession(inviteCode string, amount int64, currency, successURL, cancelURL string, metadata map[string]string, interval string) (string, error) {
+func CreateCheckoutSession(inviteCode string, amount int64, currency, productName, successURL, cancelURL string, metadata map[string]string, interval string, intervalCount int64) (*stripe.CheckoutSession, error) {
+	if productName == "" {
+		productName = "Invite Code: " + inviteCode
+	}
 	params := &stripe.CheckoutSessionParams{
 		PaymentMethodTypes: stripe.StringSlice([]string{
 			"card",
@@ -24,7 +29,7 @@ func CreateCheckoutSession(inviteCode string, amount int64, currency, successURL
 				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
 					Currency: stripe.String(currency),
 					ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-						Name: stripe.String("Invite Code: " + inviteCode),
+						Name: stripe.String(productName),
 					},
 					UnitAmount: stripe.Int64(amount),
 				},
@@ -41,6 +46,9 @@ func CreateCheckoutSession(inviteCode string, amount int64, currency, successURL
 		params.LineItems[0].PriceData.Recurring = &stripe.CheckoutSessionLineItemPriceDataRecurringParams{
 			Interval: stripe.String(interval),
 		}
+		if intervalCount > 1 {
+			params.LineItems[0].PriceData.Recurring.IntervalCount = stripe.Int64(intervalCount)
+		}
 	} else {
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
 	}
@@ -56,10 +64,10 @@ func CreateCheckoutSession(inviteCode string, amount int64, currency, successURL
 
 	s, err := session.New(params)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return s.URL, nil
+	return s, nil
 }
 
 func HandleWebhook(payload []byte, signature string, secret string, verifySignature bool) (*stripe.Event, error) {

@@ -12,6 +12,7 @@
             window.jellyfinLogin = {{ .jellyfinLogin }};
             window.jfAdminOnly = {{ .jfAdminOnly }};
             window.jfAllowAll = {{ .jfAllowAll }};
+            window.stripeEnabled = {{ .stripeEnabled }};
             window.loginAppearance = "{{ .loginAppearance }}";
         </script>
     </head>
@@ -80,6 +81,37 @@
                 <p class="content">{{ .strings.tasksDescription }}</p>
                 <div id="modal-tasks-list" class="flex flex-col gap-2"></div>
             </div>
+        </div>
+        <div id="modal-payment-subscription-cancel" class="modal">
+            <form class="card relative mx-auto my-[10%] w-11/12 sm:w-4/5 lg:w-1/3 flex flex-col gap-4" id="form-payment-subscription-cancel">
+                <span class="heading">Cancel Subscription <span class="modal-close">&times;</span></span>
+                <p class="content" id="payment-subscription-cancel-summary"></p>
+                <div class="flex flex-col gap-2">
+                    <span class="supra">End</span>
+                    <label class="switch">
+                        <input type="radio" name="payment-subscription-cancel-when" value="period_end" checked>
+                        <span>At period end</span>
+                    </label>
+                    <label class="switch">
+                        <input type="radio" name="payment-subscription-cancel-when" value="now">
+                        <span>Immediately</span>
+                    </label>
+                    <label class="switch">
+                        <input type="radio" name="payment-subscription-cancel-when" value="custom">
+                        <span>At custom date</span>
+                    </label>
+                    <input type="datetime-local" class="input ~neutral @low" id="payment-subscription-cancel-custom">
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="payment-subscription-cancel-refund">
+                    <span>Refund latest payment</span>
+                </label>
+                <aside class="aside sm ~warning @low">Cancellation changes access. Refunds are sent to Stripe and cannot be undone from jfa-go.</aside>
+                <label>
+                    <input type="submit" class="unfocused">
+                    <span class="button ~critical @low full-width center supra submit" id="payment-subscription-cancel-submit">Cancel Subscription</span>
+                </label>
+            </form>
         </div>
         <div id="modal-modify-user" class="modal">
             <form class="card relative mx-auto my-[10%] w-11/12 sm:w-4/5 lg:w-1/3 flex flex-col gap-2" id="form-modify-user" href="">
@@ -568,7 +600,9 @@
                     <button type="button" id="button-tab-accounts" class="text-3xl button portal ~neutral dark:~d_neutral @low px-5">{{ .strings.accounts }}</button>
                     <button type="button" id="button-tab-activity" class="text-3xl button portal ~neutral dark:~d_neutral @low px-5">{{ .strings.activity }}</button>
                     <button type="button" id="button-tab-settings" class="text-3xl button portal ~neutral dark:~d_neutral @low px-5">{{ .strings.settings }}</button>
-                    <button type="button" id="button-tab-store" class="text-3xl button portal ~neutral dark:~d_neutral @low px-5">Store</button>
+                    {{ if .stripeEnabled }}
+                    <button type="button" id="button-tab-payments" class="text-3xl button portal ~neutral dark:~d_neutral @low px-5">Payments</button>
+                    {{ end }}
                 </div>
             </header>
             <div id="tab-invites" class="flex flex-col gap-4">
@@ -922,35 +956,77 @@
                     </div>
                 </div>
             </div>
-            <div id="tab-store" class="flex flex-col gap-4 unfocused">
+            {{ if .stripeEnabled }}
+            <div id="tab-payments" class="flex flex-col gap-4 unfocused">
                 <div class="card @low dark:~d_neutral flex flex-col gap-2">
-                    <span class="heading">Store Configuration</span>
-                    <p class="content">Manage pricing settings for the public store page.</p>
-                    <div class="flex flex-col gap-4 max-w-lg">
-                        <label class="label flex flex-col gap-2">
-                            <span>Currency</span>
-                            <div class="select ~neutral @low">
-                                <select id="store-currency">
-                                    <option value="usd">USD</option>
-                                    <option value="eur">EUR</option>
-                                    <option value="gbp">GBP</option>
-                                    <option value="cad">CAD</option>
-                                    <option value="aud">AUD</option>
-                                </select>
+                    <div class="flex flex-col md:flex-row gap-2 md:items-center md:justify-between">
+                        <span class="heading">Payments</span>
+                        <div class="flex flex-row gap-2 self-start md:self-auto">
+                            <button type="button" id="payments-view-ledger" class="button ~urge @high gap-1" aria-pressed="true"><i class="ri-bank-card-line"></i><span>Payments</span></button>
+                            <button type="button" id="payments-view-store" class="button ~neutral @low gap-1" aria-pressed="false"><i class="ri-store-2-line"></i><span>Store</span></button>
+                        </div>
+                    </div>
+                </div>
+                <div id="payments-view-ledger-panel" class="card @low dark:~d_neutral flex flex-col gap-2 overflow-x-scroll">
+                    <div class="flex flex-col md:flex-row gap-2 md:items-center md:justify-between">
+                        <div class="flex flex-col gap-1">
+                            <span class="subheading">Payments</span>
+                            <span class="support">Paid users, refunds, subscriptions, webhooks, and fulfillment state.</span>
+                        </div>
+                        <div class="flex flex-row gap-2 self-start md:self-auto">
+                            <button class="button ~info @low" id="payments-reconcile" aria-label="Reconcile Stripe"><i class="ri-loop-left-line"></i><span>Reconcile Stripe</span></button>
+                            <button class="button ~info @low" id="payments-refresh" aria-label="{{ .strings.refresh }}"><i class="ri-refresh-line"></i></button>
+                        </div>
+                    </div>
+                    <span class="support" id="payments-reconcile-status"></span>
+                    <table class="table text-base leading-5">
+                        <thead>
+                            <tr>
+                                <th>Created</th>
+                                <th>Email</th>
+                                <th>Plan</th>
+                                <th>Amount</th>
+                                <th>Status</th>
+                                <th>Invite/User</th>
+                                <th>Provider</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="payments-list"></tbody>
+                    </table>
+                    <div class="unfocused h-[100%] my-3" id="payments-empty">
+                        <div class="flex flex-col gap-2 h-[100%] justify-center items-center">
+                            <span class="text-2xl font-medium italic text-center">No payments yet</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="payments-view-store-panel" class="card @low dark:~d_neutral flex flex-col gap-3 unfocused">
+                    <div class="flex flex-col md:flex-row gap-2 md:justify-between md:items-center">
+                        <div class="flex flex-col gap-1">
+                            <span class="subheading">Store</span>
+                            <span class="support">Public plans shown on the store page and sent to Stripe checkout.</span>
+                        </div>
+                        <div class="flex flex-row flex-wrap gap-2 self-start md:self-auto">
+                            <button id="payments-plan-add" class="button ~neutral @low gap-1"><i class="ri-add-line"></i><span>Add Plan</span></button>
+                            <button id="payments-save" class="button ~urge @low gap-1"><i class="ri-save-line"></i><span>Save Plans</span></button>
+                        </div>
+                    </div>
+                    <aside class="aside sm ~urge dark:~d_info @low">
+                        Plans are public store options. Select one to edit the details that Stripe receives and the access jfa-go grants after payment.
+                    </aside>
+                    <div class="grid grid-cols-1 xl:grid-cols-[minmax(14rem,22rem)_1fr] gap-4">
+                        <div class="flex flex-col gap-2" id="payments-plan-list"></div>
+                        <div class="min-w-0">
+                            <div id="payments-plan-editor-empty" class="h-full flex flex-col gap-2 justify-center items-center py-8">
+                                <span class="text-2xl font-medium italic text-center">No plan selected</span>
+                                <span class="support text-center">Add or select a plan to edit it.</span>
                             </div>
-                        </label>
-                        <label class="label flex flex-col gap-2">
-                            <span>Monthly Price (Standard)</span>
-                            <div class="flex flex-row items-center gap-2">
-                                <span class="text-xl">$</span>
-                                <input type="number" step="0.01" id="store-price-monthly" class="input ~neutral @low w-full">
-                            </div>
-                            <span class="support">Price for monthly subscription in dollars (e.g. 2.00)</span>
-                        </label>
-                        <button id="store-save" class="button ~urge @low self-start">Save Changes</button>
+                            <div id="payments-plan-editor" class="unfocused flex flex-col gap-4"></div>
+                        </div>
                     </div>
                 </div>
             </div>
+            {{ end }}
         </div>
         <script src="{{ .pages.Base }}/js/admin.js" type="module"></script>
     </div></body>

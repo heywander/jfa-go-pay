@@ -467,15 +467,9 @@ func start(asDaemon, firstCall bool) {
 
 		if stripeEnabled {
 			apiKey := app.config.Section("stripe").Key("api_key").String()
+			app.paymentInstanceID()
 			InitStripe(apiKey)
 			app.info.Println(lm.InitStripe)
-		}
-
-		if btcpayEnabled {
-			InitBTCPay(app.config)
-			if btcpayEnabled {
-				app.info.Println(lm.InitBTCPay)
-			}
 		}
 
 		u := app.config.Section("jellyfin").Key("username").String()
@@ -650,6 +644,7 @@ func start(asDaemon, firstCall bool) {
 		}
 	}
 
+	loadCSSVersionFallback()
 	cssHeader = app.loadCSSHeader()
 	// workaround for potentially broken windows mime types
 	mime.AddExtensionType(".js", "application/javascript")
