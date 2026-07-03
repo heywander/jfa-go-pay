@@ -26,6 +26,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch git tags
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --force --prune --tags --unshallow origin
+          else
+            git fetch --force --prune --tags origin
+          fi
+
       - name: Verify git tags
         run: git describe --tags --abbrev=0
 
