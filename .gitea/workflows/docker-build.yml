@@ -23,6 +23,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify git tags
+        run: git describe --tags --abbrev=0
 
       - name: Prepare image metadata
         run: |
