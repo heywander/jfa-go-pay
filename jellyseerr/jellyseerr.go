@@ -37,6 +37,7 @@ type Jellyseerr struct {
 
 // NewJellyseerr returns an Ombi object.
 func NewJellyseerr(server, key string, timeoutHandler co.TimeoutHandler) *Jellyseerr {
+	server = strings.TrimRight(server, "/")
 	if !strings.HasSuffix(server, API_SUFFIX) {
 		server = server + API_SUFFIX
 	}
