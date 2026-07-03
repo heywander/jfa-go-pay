@@ -1,0 +1,69 @@
+name: Docker Build
+
+on:
+  push:
+    branches: ["main", "test", "feature/**"]
+    tags: ["v*"]
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_HOST: tcp://172.17.0.2:2375
+      DOCKER_BUILDKIT: "1"
+      IMAGE: git.unfilteredrealm.com/wander/jfa-go
+      SOURCE_URL: https://git.unfilteredrealm.com/wander/jfa-go
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare image metadata
+        run: |
+          REF_TYPE="${GITHUB_REF_TYPE:-branch}"
+          REF_NAME="${GITHUB_REF_NAME:-main}"
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          elif [ "$REF_NAME" = "main" ]; then
+            TAG="latest"
+          else
+            TAG="$(printf '%s' "$REF_NAME" | tr '[:upper:]/' '[:lower:]-' | sed 's/[^a-z0-9_.-]/-/g')"
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE}:${TAG}" >> "$GITHUB_ENV"
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: git.unfilteredrealm.com
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Show image tags
+        run: |
+          echo "${IMAGE_TAG}"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg "BUILT_BY=${GITHUB_ACTOR:-gitea}" \
+            --label "org.opencontainers.image.source=${SOURCE_URL}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t "${IMAGE_TAG}" \
+            .
+          docker image inspect "${IMAGE_TAG}" --format 'Built image {{.Id}} for revision {{index .Config.Labels "org.opencontainers.image.revision"}}'
+
+      - name: Push Docker image
+        run: |
+          docker push "${IMAGE_TAG}"
+
+      - name: Verify published image
+        run: |
+          docker manifest inspect "${IMAGE_TAG}" >/tmp/published-manifest.json
+          cat /tmp/published-manifest.json
