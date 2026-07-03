@@ -273,6 +273,9 @@ func (app *appContext) loadRoutes(router *gin.Engine) {
 		api.GET(p+"/tasks", app.TaskList)
 		api.POST(p+"/tasks/housekeeping", app.TaskHousekeeping)
 		api.POST(p+"/tasks/users", app.TaskUserCleanup)
+		if stripeEnabled {
+			api.POST(p+"/tasks/stripe", app.TaskStripeReconcile)
+		}
 		if app.config.Section("jellyseerr").Key("enabled").MustBool(false) {
 			api.POST(p+"/tasks/jellyseerr", app.TaskJellyseerrImport)
 		}

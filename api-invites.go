@@ -103,6 +103,10 @@ func (app *appContext) checkInvite(code string, used bool, username string) bool
 }
 
 func (app *appContext) deleteExpiredInvite(data Invite) {
+	if app.preserveExpiredPaidInvite(data) {
+		return
+	}
+
 	app.debug.Printf(lm.DeleteOldInvite, data.Code)
 
 	// Disable referrals for the user if UseReferralExpiry is enabled, so no new ones are made.

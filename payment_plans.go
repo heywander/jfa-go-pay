@@ -235,6 +235,7 @@ func (app *appContext) paymentPlanByID(id string) (PaymentPlan, bool) {
 	normalized := normalizePaymentPlanID(id)
 	for _, plan := range app.paymentPlans() {
 		if plan.ID == normalized || strings.EqualFold(plan.Name, id) {
+			app.warnIfPaymentPlanProfileAdmin(plan)
 			return plan, true
 		}
 	}
@@ -245,6 +246,9 @@ func (app *appContext) savePaymentPlans(plans []PaymentPlan) error {
 	plans, err := normalizePaymentPlans(plans, app.config.Section("stripe").Key("price_currency").MustString("usd"))
 	if err != nil {
 		return err
+	}
+	for _, plan := range plans {
+		app.warnIfPaymentPlanProfileAdmin(plan)
 	}
 	encoded, err := json.Marshal(plans)
 	if err != nil {
@@ -268,6 +272,17 @@ func (app *appContext) savePaymentPlans(plans []PaymentPlan) error {
 	app.ReloadConfig()
 	app.PatchConfigBase()
 	return nil
+}
+
+func (app *appContext) warnIfPaymentPlanProfileAdmin(plan PaymentPlan) {
+	if app == nil || app.storage == nil || app.err == nil || plan.Profile == "" {
+		return
+	}
+	profile, ok := app.storage.GetProfileKey(plan.Profile)
+	if !ok || !profile.Policy.IsAdministrator {
+		return
+	}
+	app.err.Printf("Stripe payment plan %q uses profile %q with Jellyfin administrator privileges; paid users created with this plan will become admins.", plan.Name, plan.Profile)
 }
 
 func planByLegacyName(plans []PaymentPlan, name string) (PaymentPlan, bool) {

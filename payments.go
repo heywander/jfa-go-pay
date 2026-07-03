@@ -36,6 +36,8 @@ const (
 	paymentEmailSent          = "sent"
 	paymentEmailFailed        = "failed"
 	paymentEmailDisabled      = "disabled"
+
+	paymentInviteExpiredNeedsReview = "Paid invite expired before redemption"
 )
 
 type paymentFulfillment struct {
@@ -240,7 +242,12 @@ func (app *appContext) ResendPaymentInvite(gc *gin.Context) {
 		respond(404, "Invite not found", gc)
 		return
 	}
+	if !paymentCanRecoverInvite(payment) {
+		respond(400, "Payment is not eligible for invite resend", gc)
+		return
+	}
 
+	invite = app.refreshPurchasedInviteForResend(payment, invite)
 	app.sendPurchasedInvite(invite, payment.TargetEmail, paymentID, payment.Plan)
 	gc.JSON(200, stringResponse{Response: "Invite queued"})
 }
@@ -358,6 +365,69 @@ func stripeSubscriptionPaymentScore(payment Payment) int64 {
 		created = 0
 	}
 	return statusScore*1_000_000_000_000 + created
+}
+
+func (app *appContext) shouldSkipExpiredPaidUser(userID string, expiry UserExpiry) bool {
+	return app.shouldSkipExpiredPaidUserWithReconcile(userID, expiry, app.reconcileStripePayments)
+}
+
+func (app *appContext) shouldSkipExpiredPaidUserWithReconcile(userID string, expiry UserExpiry, reconcile func() ReconcilePaymentsDTO) bool {
+	if !stripeEnabled {
+		return false
+	}
+
+	payment, ok := app.stripeSubscriptionForUser(userID)
+	if !ok || !stripeSubscriptionGrantsUserAccess(payment, expiry, time.Now()) {
+		return false
+	}
+
+	if reconcile != nil {
+		result := reconcile()
+		if result.Error != "" && app.err != nil {
+			app.err.Printf("Stripe reconciliation failed while checking paid expiry for %s: %s", userID, result.Error)
+		}
+	}
+
+	payment, ok = app.stripeSubscriptionForUser(userID)
+	return ok && stripeSubscriptionGrantsUserAccess(payment, expiry, time.Now())
+}
+
+func stripeSubscriptionGrantsUserAccess(payment Payment, expiry UserExpiry, now time.Time) bool {
+	if payment.Provider != lm.Stripe || payment.SubscriptionID == "" {
+		return false
+	}
+
+	switch payment.Status {
+	case paymentStatusRefunded,
+		paymentStatusSubscriptionCanceled,
+		paymentStatusSubscriptionLapsed,
+		paymentStatusPaymentCanceled,
+		paymentStatusCheckoutExpired:
+		return false
+	}
+
+	switch payment.SubscriptionStatus {
+	case "active", "trialing":
+		if payment.SubscriptionCancelAt > 0 || payment.SubscriptionCancelAtPeriodEnd || payment.Status == paymentStatusSubscriptionCanceling {
+			return stripeSubscriptionAccessUntil(payment, expiry).After(now)
+		}
+		return true
+	default:
+		if payment.Status == paymentStatusSubscriptionCanceling {
+			return stripeSubscriptionAccessUntil(payment, expiry).After(now)
+		}
+		return false
+	}
+}
+
+func stripeSubscriptionAccessUntil(payment Payment, expiry UserExpiry) time.Time {
+	if payment.SubscriptionCancelAt > 0 {
+		return time.Unix(payment.SubscriptionCancelAt, 0)
+	}
+	if !expiry.Expiry.IsZero() {
+		return expiry.Expiry
+	}
+	return time.Time{}
 }
 
 func (app *appContext) mySubscriptionDTO(userID string) *MySubscriptionDTO {
@@ -701,6 +771,89 @@ func (app *appContext) createPurchasedInvite(provider, targetEmail, plan, profil
 
 	app.storage.SetInvitesKey(inviteCode, invite)
 	app.info.Printf(lm.GeneratedInviteForPurchase, inviteCode, targetEmail)
+	return invite
+}
+
+func (app *appContext) preserveExpiredPaidInvite(invite Invite) bool {
+	payment, ok := app.paymentForInvite(invite)
+	if !ok && invite.PaymentStatus != paymentStatusPaid {
+		return false
+	}
+	if ok && !paymentCanRecoverInvite(payment) {
+		return false
+	}
+
+	paymentID := invite.PaymentID
+	if ok {
+		paymentID = payment.ID
+		app.setPayment(payment.ID, func(payment *Payment) {
+			if payment.InviteCode == "" {
+				payment.InviteCode = invite.Code
+			}
+			if !paymentStatusIsLifecycle(payment.Status) {
+				payment.Status = paymentStatusNeedsReview
+				payment.Error = paymentInviteExpiredNeedsReview
+			} else if payment.Error == "" {
+				payment.Error = paymentInviteExpiredNeedsReview
+			}
+		})
+	}
+
+	app.info.Printf("Preserving expired paid invite %s for payment %s", invite.Code, paymentID)
+	return true
+}
+
+func (app *appContext) paymentForInvite(invite Invite) (Payment, bool) {
+	if invite.PaymentID != "" {
+		if payment, ok := app.storage.GetPaymentKey(invite.PaymentID); ok {
+			return payment, true
+		}
+	}
+	for _, payment := range app.storage.GetPayments() {
+		if payment.InviteCode == invite.Code {
+			return payment, true
+		}
+	}
+	return Payment{}, false
+}
+
+func paymentCanRecoverInvite(payment Payment) bool {
+	switch payment.Status {
+	case paymentStatusRefunded,
+		paymentStatusSubscriptionCanceled,
+		paymentStatusSubscriptionLapsed,
+		paymentStatusPaymentCanceled,
+		paymentStatusCheckoutExpired:
+		return false
+	}
+	return payment.Status == paymentStatusPaid ||
+		payment.Status == paymentStatusFulfilled ||
+		payment.Status == paymentStatusEmailSent ||
+		payment.Status == paymentStatusEmailFailed ||
+		payment.Status == paymentStatusNeedsReview ||
+		payment.Status == paymentStatusSubscriptionCanceling ||
+		payment.Status == paymentStatusSubscriptionPastDue ||
+		!payment.PaidAt.IsZero()
+}
+
+func (app *appContext) refreshPurchasedInviteForResend(payment Payment, invite Invite) Invite {
+	if !time.Now().After(invite.ValidTill) {
+		return invite
+	}
+
+	var userExpiry bool
+	invite.ValidTill, userExpiry = paidPlanExpiry(payment.Plan, payment.AccessMonths, payment.AccessDays, time.Now())
+	if userExpiry {
+		invite.UserExpiry = true
+		if payment.AccessMonths > 0 || payment.AccessDays > 0 {
+			invite.UserMonths = payment.AccessMonths
+			invite.UserDays = payment.AccessDays
+		} else if invite.UserMonths == 0 && invite.UserDays == 0 && normalizePaymentPlan(payment.Plan) == paymentPlanMonthly {
+			invite.UserMonths = 1
+		}
+	}
+
+	app.storage.SetInvitesKey(invite.Code, invite)
 	return invite
 }
 

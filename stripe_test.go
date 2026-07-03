@@ -4,14 +4,18 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hrfee/jfa-go/logger"
+	lm "github.com/hrfee/jfa-go/logmessages"
 	"github.com/stripe/stripe-go/v86"
 	"github.com/timshannon/badgerhold/v4"
 	"gopkg.in/ini.v1"
@@ -434,5 +438,226 @@ func TestStripeSubscriptionCancelingIsVisibleBeforePeriodEnd(t *testing.T) {
 	}
 	if !strings.Contains(payment.Error, time.Unix(cancelAt, 0).Format("2006-01-02")) {
 		t.Fatalf("expected cancel date in detail, got %q", payment.Error)
+	}
+}
+
+func TestTaskListIncludesStripeWhenEnabled(t *testing.T) {
+	oldStripeEnabled := stripeEnabled
+	stripeEnabled = true
+	t.Cleanup(func() {
+		stripeEnabled = oldStripeEnabled
+	})
+
+	gin.SetMode(gin.TestMode)
+	app := newStripePaymentTestApp(t)
+	w := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(w)
+
+	app.TaskList(gc)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	resp := TasksDTO{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode tasks response: %v", err)
+	}
+	for _, task := range resp.Tasks {
+		if task.URL == "/tasks/stripe" {
+			return
+		}
+	}
+	t.Fatalf("expected Stripe task in response: %+v", resp.Tasks)
+}
+
+func TestExpiredPaidUserSkipsCleanupForActiveStripeSubscription(t *testing.T) {
+	oldStripeEnabled := stripeEnabled
+	stripeEnabled = true
+	t.Cleanup(func() {
+		stripeEnabled = oldStripeEnabled
+	})
+
+	app := newStripePaymentTestApp(t)
+	app.storage.SetEmailsKey("jf_user", EmailAddress{Addr: "test@example.com"})
+	app.storage.SetPaymentKey("cs_active", Payment{
+		Provider:           lm.Stripe,
+		InstanceID:         "instance_test",
+		SubscriptionID:     "sub_active",
+		TargetEmail:        "test@example.com",
+		JellyfinID:         "jf_user",
+		Status:             paymentStatusFulfilled,
+		SubscriptionStatus: string(stripe.SubscriptionStatusActive),
+	})
+
+	reconciled := false
+	skip := app.shouldSkipExpiredPaidUserWithReconcile("jf_user", UserExpiry{
+		Expiry:            time.Now().Add(-time.Hour),
+		DeleteAfterPeriod: true,
+	}, func() ReconcilePaymentsDTO {
+		reconciled = true
+		return ReconcilePaymentsDTO{}
+	})
+
+	if !skip {
+		t.Fatal("expected active Stripe subscription to skip expiry cleanup")
+	}
+	if !reconciled {
+		t.Fatal("expected active Stripe subscription check to trigger reconciliation")
+	}
+}
+
+func TestExpiredPaidUserDoesNotSkipCleanupForTerminalStripeSubscription(t *testing.T) {
+	oldStripeEnabled := stripeEnabled
+	stripeEnabled = true
+	t.Cleanup(func() {
+		stripeEnabled = oldStripeEnabled
+	})
+
+	app := newStripePaymentTestApp(t)
+	app.storage.SetEmailsKey("jf_user", EmailAddress{Addr: "test@example.com"})
+	app.storage.SetPaymentKey("cs_canceled", Payment{
+		Provider:           lm.Stripe,
+		InstanceID:         "instance_test",
+		SubscriptionID:     "sub_canceled",
+		TargetEmail:        "test@example.com",
+		JellyfinID:         "jf_user",
+		Status:             paymentStatusSubscriptionCanceled,
+		SubscriptionStatus: string(stripe.SubscriptionStatusCanceled),
+	})
+
+	reconciled := false
+	skip := app.shouldSkipExpiredPaidUserWithReconcile("jf_user", UserExpiry{
+		Expiry: time.Now().Add(-time.Hour),
+	}, func() ReconcilePaymentsDTO {
+		reconciled = true
+		return ReconcilePaymentsDTO{}
+	})
+
+	if skip {
+		t.Fatal("did not expect canceled Stripe subscription to skip expiry cleanup")
+	}
+	if reconciled {
+		t.Fatal("did not expect terminal Stripe subscription to trigger reconciliation")
+	}
+}
+
+func TestCancelingStripeSubscriptionSkipsCleanupUntilCancelDate(t *testing.T) {
+	oldStripeEnabled := stripeEnabled
+	stripeEnabled = true
+	t.Cleanup(func() {
+		stripeEnabled = oldStripeEnabled
+	})
+
+	app := newStripePaymentTestApp(t)
+	app.storage.SetEmailsKey("jf_user", EmailAddress{Addr: "test@example.com"})
+	app.storage.SetPaymentKey("cs_canceling", Payment{
+		Provider:                      lm.Stripe,
+		InstanceID:                    "instance_test",
+		SubscriptionID:                "sub_canceling",
+		TargetEmail:                   "test@example.com",
+		JellyfinID:                    "jf_user",
+		Status:                        paymentStatusSubscriptionCanceling,
+		SubscriptionStatus:            string(stripe.SubscriptionStatusActive),
+		SubscriptionCancelAt:          time.Now().Add(24 * time.Hour).Unix(),
+		SubscriptionCancelAtPeriodEnd: true,
+	})
+
+	skip := app.shouldSkipExpiredPaidUserWithReconcile("jf_user", UserExpiry{
+		Expiry: time.Now().Add(-time.Hour),
+	}, func() ReconcilePaymentsDTO {
+		return ReconcilePaymentsDTO{}
+	})
+
+	if !skip {
+		t.Fatal("expected canceling Stripe subscription to skip cleanup before cancel date")
+	}
+}
+
+func TestExpiredPaidInviteIsPreservedForRecovery(t *testing.T) {
+	app := newStripePaymentTestApp(t)
+	expired := time.Now().Add(-time.Hour)
+	invite := Invite{
+		Code:          "paid_invite",
+		ValidTill:     expired,
+		PaymentID:     "cs_paid",
+		PaymentStatus: paymentStatusPaid,
+		UserExpiry:    true,
+		UserMonths:    1,
+	}
+	app.storage.SetInvitesKey(invite.Code, invite)
+	app.storage.SetPaymentKey("cs_paid", Payment{
+		Provider:    lm.Stripe,
+		InviteCode:  invite.Code,
+		TargetEmail: "test@example.com",
+		Plan:        paymentPlanMonthly,
+		Status:      paymentStatusEmailSent,
+		PaidAt:      time.Now().Add(-2 * time.Hour),
+	})
+
+	app.deleteExpiredInvite(invite)
+
+	preserved, ok := app.storage.GetInvitesKey(invite.Code)
+	if !ok {
+		t.Fatal("expected paid invite to be preserved")
+	}
+	if !preserved.ValidTill.Equal(expired) {
+		t.Fatal("expected housekeeping to preserve, not extend, the paid invite")
+	}
+	payment, ok := app.storage.GetPaymentKey("cs_paid")
+	if !ok {
+		t.Fatal("expected payment to remain stored")
+	}
+	if payment.Status != paymentStatusNeedsReview {
+		t.Fatalf("expected payment status %q, got %q", paymentStatusNeedsReview, payment.Status)
+	}
+	if payment.Error != paymentInviteExpiredNeedsReview {
+		t.Fatalf("expected payment review reason %q, got %q", paymentInviteExpiredNeedsReview, payment.Error)
+	}
+}
+
+func TestExpiredUnpaidInviteIsDeleted(t *testing.T) {
+	app := newStripePaymentTestApp(t)
+	invite := Invite{
+		Code:      "unpaid_invite",
+		ValidTill: time.Now().Add(-time.Hour),
+	}
+	app.storage.SetInvitesKey(invite.Code, invite)
+
+	app.deleteExpiredInvite(invite)
+
+	if _, ok := app.storage.GetInvitesKey(invite.Code); ok {
+		t.Fatal("expected unpaid expired invite to be deleted")
+	}
+}
+
+func TestExpiredPaidInviteRefreshesBeforeResend(t *testing.T) {
+	app := newStripePaymentTestApp(t)
+	invite := Invite{
+		Code:       "paid_invite",
+		ValidTill:  time.Now().Add(-time.Hour),
+		UserExpiry: true,
+	}
+	payment := Payment{
+		ID:           "cs_paid",
+		Provider:     lm.Stripe,
+		InviteCode:   invite.Code,
+		Plan:         paymentPlanMonthly,
+		AccessMonths: 1,
+		Status:       paymentStatusNeedsReview,
+		PaidAt:       time.Now().Add(-2 * time.Hour),
+	}
+	app.storage.SetInvitesKey(invite.Code, invite)
+
+	refreshed := app.refreshPurchasedInviteForResend(payment, invite)
+
+	if !refreshed.ValidTill.After(time.Now()) {
+		t.Fatalf("expected refreshed invite expiry to be in the future, got %s", refreshed.ValidTill)
+	}
+	stored, ok := app.storage.GetInvitesKey(invite.Code)
+	if !ok {
+		t.Fatal("expected refreshed invite to be stored")
+	}
+	if !stored.ValidTill.Equal(refreshed.ValidTill) {
+		t.Fatalf("expected stored invite expiry %s, got %s", refreshed.ValidTill, stored.ValidTill)
 	}
 }

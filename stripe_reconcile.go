@@ -84,6 +84,15 @@ func (app *appContext) ReconcileStripePayments(gc *gin.Context) {
 		return
 	}
 
+	result := app.reconcileStripePayments()
+	if result.Error != "" {
+		gc.JSON(500, result)
+		return
+	}
+	gc.JSON(200, result)
+}
+
+func (app *appContext) reconcileStripePayments() ReconcilePaymentsDTO {
 	instanceID := app.paymentInstanceID()
 	params := &stripe.CheckoutSessionListParams{
 		CreatedRange: &stripe.RangeQueryParams{
@@ -102,13 +111,12 @@ func (app *appContext) ReconcileStripePayments(gc *gin.Context) {
 		sessions = append(sessions, iter.CheckoutSession())
 	}
 	if err := iter.Err(); err != nil {
-		gc.JSON(500, ReconcilePaymentsDTO{Error: err.Error()})
-		return
+		return ReconcilePaymentsDTO{Error: err.Error()}
 	}
 
 	result := app.reconcileStripeCheckoutSessions(instanceID, sessions)
 	app.reconcileStoredStripePayments(instanceID, &result)
-	gc.JSON(200, result)
+	return result
 }
 
 func (app *appContext) reconcileStripeCheckoutSessions(instanceID string, sessions []*stripe.CheckoutSession) ReconcilePaymentsDTO {
