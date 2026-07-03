@@ -311,6 +311,7 @@ func (app *appContext) fulfillStripeInviteUnlock(paymentID, refID string, metada
 	if !ok {
 		return false
 	}
+	inv.PaymentID = paymentID
 	inv.PaymentStatus = "paid"
 	app.storage.SetInvitesKey(inviteCode, inv)
 	app.markPaymentFulfilled(paymentID, paymentFulfillmentResult{InviteCode: inviteCode})

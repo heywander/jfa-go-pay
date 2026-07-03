@@ -41,6 +41,12 @@ func (app *appContext) PostStripeCheckout(gc *gin.Context) {
 	baseURL := ExternalURI(gc)
 	successURL := fmt.Sprintf("%s/invite/%s?success=payment", baseURL, code)
 	cancelURL := fmt.Sprintf("%s/invite/%s?canceled=payment", baseURL, code)
+	lockToken, lockHash, err := newPaymentLockToken()
+	if err != nil {
+		app.err.Printf("Failed to create payment lock: %v", err)
+		respond(500, "Failed to create payment lock", gc)
+		return
+	}
 
 	metadata := app.stripePaymentMetadata(map[string]string{
 		stripeMetadataFlow:       stripeMetadataFlowInviteUnlock,
@@ -73,12 +79,14 @@ func (app *appContext) PostStripeCheckout(gc *gin.Context) {
 		payment.Status = paymentStatusCheckoutCreated
 		payment.EmailStatus = paymentEmailNotApplicable
 		payment.InviteCode = code
+		payment.InviteLockHash = lockHash
+		setPaymentLockCreated(payment)
 		if session.Created > 0 {
 			payment.Created = time.Unix(session.Created, 0)
 		}
 	})
 
-	gc.SetCookie("jfa_payment_lock", code, 3600*24, "/", "", false, true)
+	gc.SetCookie(paymentLockCookieName, lockToken, paymentLockMaxAge, "/", "", false, true)
 
 	gc.JSON(200, stringResponse{Response: session.URL})
 }

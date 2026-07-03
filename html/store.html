@@ -7,6 +7,7 @@
 </head>
 
 <body class="max-w-full overflow-x-hidden section">
+    <div id="notification-box"></div>
     <div class="page-container m-2 lg:my-16 lg:mx-32 flex flex-col gap-6">
         {{ template "lang-select.html" . }}
 
@@ -17,12 +18,12 @@
 
         <div class="card ~neutral @low dark:~d_neutral flex flex-col md:flex-row gap-4 md:items-end">
             <label class="label flex flex-col gap-2 grow">
-                <span class="supra">Email</span>
-                <input type="email" id="email-input" class="input ~neutral @high w-full" placeholder="you@example.com" required>
+                <span class="supra">{{ .strings.emailAddress }}</span>
+                <input type="email" id="email-input" class="input ~neutral @high w-full" placeholder="{{ .strings.storeEmailPlaceholder }}" required>
             </label>
-            <div class="content md:max-w-sm">Your invite code will be sent to this address.</div>
+            <div class="content md:max-w-sm">{{ .strings.storeEmailNotice }}</div>
         </div>
-        <p class="text-sm text-red-500 hidden font-bold" id="email-error"><i class="ri-error-warning-line"></i> Please enter a valid email address.</p>
+        <p class="text-sm text-red-500 hidden font-bold" id="email-error"><i class="ri-error-warning-line"></i> {{ .strings.storeEmailError }}</p>
 
         {{ if .plans }}
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -37,79 +38,24 @@
                     <span class="content uppercase">{{ .Currency }}</span>
                 </div>
                 <div class="flex flex-col gap-2">
-                    <div class="flex items-center gap-2"><span class="badge ~positive @low"><i class="ri-check-line"></i></span><span class="content">Instant invite delivery</span></div>
+                    <div class="flex items-center gap-2"><span class="badge ~positive @low"><i class="ri-check-line"></i></span><span class="content">{{ $.strings.storeInstantDelivery }}</span></div>
                     <div class="flex items-center gap-2"><span class="badge ~warning @low"><i class="ri-time-line"></i></span><span class="content">{{ .Access }}</span></div>
                     <div class="flex items-center gap-2"><span class="badge ~info @low"><i class="ri-bank-card-line"></i></span><span class="content">{{ .Billing }}</span></div>
                 </div>
                 <button class="button ~info @low full-width center mt-auto gap-2 store-checkout" data-plan="{{ .ID }}">
-                    <span>Pay with Stripe</span><i class="ri-bank-card-line"></i>
+                    <span>{{ $.strings.storePayButton }}</span><i class="ri-bank-card-line"></i>
                 </button>
             </div>
             {{ end }}
         </div>
         {{ else }}
         <div class="card @low dark:~d_neutral">
-            <span class="content">No payment plans are currently available.</span>
+            <span class="content">{{ .strings.storeNoPlans }}</span>
         </div>
         {{ end }}
     </div>
 
-
-    <script>
-        async function initiateCheckout(plan, btnElement) {
-            const emailInput = document.getElementById('email-input');
-            const email = emailInput.value.trim();
-            const errorMsg = document.getElementById('email-error');
-
-            if (!email || !email.includes('@')) {
-                errorMsg.classList.remove('hidden');
-                emailInput.focus();
-                // scroll to input
-                emailInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                return;
-            }
-            errorMsg.classList.add('hidden');
-
-            const originalText = btnElement.innerText;
-            btnElement.innerText = "Processing...";
-            btnElement.style.pointerEvents = "none";
-
-            // Disable all buttons to prevent double clicks
-            const allBtns = document.querySelectorAll('.store-checkout');
-            allBtns.forEach(b => b.disabled = true);
-
-            try {
-                const response = await fetch('{{ .pages.Base }}/stripe/create-checkout', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email: email, plan: plan })
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Network response was not ok');
-                }
-
-                if (data.response) {
-                    window.location.href = data.response;
-                } else {
-                    throw new Error('No redirect URL received');
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Something went wrong: ' + error.message);
-                btnElement.innerText = originalText;
-                btnElement.style.pointerEvents = "auto";
-                allBtns.forEach(b => b.disabled = false);
-            }
-        }
-
-        document.querySelectorAll('.store-checkout').forEach((button) => {
-            button.addEventListener('click', () => initiateCheckout(button.dataset.plan, button));
-        });
-
-    </script>
+    <script src="{{ .pages.Base }}/js/store.js" type="module"></script>
 </body>
 
 </html>

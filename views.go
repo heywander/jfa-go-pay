@@ -777,16 +777,12 @@ func (app *appContext) InviteProxy(gc *gin.Context) {
 		return
 	}
 
-	// Security: If invite is paid, ensure it matches the browser that paid for it.
-	if invite.PaymentStatus == "paid" {
-		cookie, err := gc.Cookie("jfa_payment_lock")
-		if err != nil || cookie != invite.Code {
-			app.info.Printf("Blocked access to paid invite %s due to missing/mismatching payment cookie.", invite.Code)
-			app.gcHTML(gc, 403, "invalidCode.html", FormPage, lang, gin.H{
-				"contactMessage": "This invite has been paid for by another browser session. To prevent theft, paid invites are locked to the device that made the payment.",
-			})
-			return
-		}
+	if invite.PaymentStatus == "paid" && !app.paidInvitePaymentLockFromCookie(gc, invite) {
+		app.info.Printf("Blocked access to paid invite %s due to missing/mismatching payment lock.", invite.Code)
+		app.gcHTML(gc, 403, "invalidCode.html", FormPage, lang, gin.H{
+			"contactMessage": "This invite has been paid for by another browser session. To prevent theft, paid invites are locked to the device that made the payment.",
+		})
+		return
 	}
 
 	if key := gc.Query("key"); key != "" && app.config.Section("email_confirmation").Key("enabled").MustBool(false) {
@@ -925,7 +921,7 @@ func (app *appContext) NoRouteHandler(gc *gin.Context) {
 
 // StorePage serves the public store page
 func (app *appContext) StorePage(gc *gin.Context) {
-	lang := app.storage.lang.chosenUserLang
+	lang := app.getLang(gc, FormPage, app.storage.lang.chosenUserLang)
 	app.gcHTML(gc, 200, "store.html", OtherPage, lang, gin.H{
 		"strings": app.storage.lang.User[lang].Strings,
 		"plans":   storePlanViews(app.publicPaymentPlans()),
@@ -934,7 +930,7 @@ func (app *appContext) StorePage(gc *gin.Context) {
 
 // PaymentSuccessPage serves the dedicated payment success page
 func (app *appContext) PaymentSuccessPage(gc *gin.Context) {
-	lang := app.storage.lang.chosenUserLang
+	lang := app.getLang(gc, FormPage, app.storage.lang.chosenUserLang)
 	app.gcHTML(gc, 200, "payment_success.html", OtherPage, lang, gin.H{
 		"strings":        app.storage.lang.User[lang].Strings,
 		"contactMessage": app.config.Section("ui").Key("contact_message").String(),

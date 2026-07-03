@@ -93,5 +93,9 @@ func HandleWebhook(payload []byte, signature string, secret string, verifySignat
 		event = *eventPtr
 	}
 
+	if event.APIVersion != supportedStripeWebhookAPIVersion {
+		return nil, fmt.Errorf("Stripe webhook API version %q does not match supported version %q", event.APIVersion, supportedStripeWebhookAPIVersion)
+	}
+
 	return &event, nil
 }

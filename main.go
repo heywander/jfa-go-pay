@@ -28,7 +28,7 @@ import (
 	"gopkg.in/ini.v1"
 
 	"github.com/hrfee/jfa-go/common"
-	// _ "github.com/hrfee/jfa-go/docs"
+	_ "github.com/hrfee/jfa-go/docs"
 	"github.com/hrfee/jfa-go/jellyseerr"
 	"github.com/hrfee/jfa-go/logger"
 	lm "github.com/hrfee/jfa-go/logmessages"
@@ -265,9 +265,6 @@ func start(asDaemon, firstCall bool) {
 	}
 
 	app.version = app.config.Section("jellyfin").Key("version").String()
-	if app.version == "" {
-		app.version = "0.6.0"
-	}
 	// read from config...
 	debugMode = app.config.Section("ui").Key("debug").MustBool(false)
 	// then from flag
@@ -474,9 +471,6 @@ func start(asDaemon, firstCall bool) {
 
 		u := app.config.Section("jellyfin").Key("username").String()
 		p := app.config.Section("jellyfin").Key("password").String()
-		if app.version == "" {
-			app.version = "1.0.0"
-		}
 		_, err = app.jf.MustAuthenticate(u, p, retryOpts)
 		if err != nil {
 			app.err.Fatalf(lm.FailedAuthJellyfin, server, status, err)

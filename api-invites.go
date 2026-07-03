@@ -89,8 +89,9 @@ func (app *appContext) checkInvite(code string, used bool, username string) bool
 		}
 		newInv.UsedBy = append(newInv.UsedBy, []string{username, strconv.FormatInt(currentTime.Unix(), 10)})
 
-		// Reset PaymentStatus to ensure multi-use invites require payment PER USE.
+		// Multi-use paid invites require a separate payment for each use.
 		if newInv.PaymentStatus == "paid" {
+			newInv.PaymentID = ""
 			newInv.PaymentStatus = ""
 		}
 

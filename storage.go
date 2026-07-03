@@ -102,6 +102,8 @@ type Payment struct {
 	SubscriptionEndedAt           int64
 	SubscriptionCancelNotifiedAt  time.Time
 	InviteCode                    string
+	InviteLockHash                string
+	InviteLockCreatedAt           time.Time
 	JellyfinID                    string
 	Error                         string
 	Created                       time.Time

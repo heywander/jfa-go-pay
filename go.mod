@@ -35,6 +35,7 @@ require (
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/gomarkdown/markdown v0.0.0-20250810172220-2e2c11897d1a
 	github.com/hrfee/jfa-go/common v0.0.0-20251123165523-7c9f91711460
+	github.com/hrfee/jfa-go/docs v0.0.0-20251123165523-7c9f91711460
 	github.com/hrfee/jfa-go/easyproxy v0.0.0-20251123165523-7c9f91711460
 	github.com/hrfee/jfa-go/jellyseerr v0.0.0-20251123165523-7c9f91711460
 	github.com/hrfee/jfa-go/linecache v0.0.0-20251123165523-7c9f91711460

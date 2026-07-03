@@ -159,6 +159,52 @@ func TestStripePaymentMetadataIncludesAndPersistsInstanceID(t *testing.T) {
 	}
 }
 
+func TestPaidInvitePaymentLockRequiresHashedToken(t *testing.T) {
+	app := newStripePaymentTestApp(t)
+	token, hash, err := newPaymentLockToken()
+	if err != nil {
+		t.Fatalf("failed to create payment lock: %v", err)
+	}
+
+	app.storage.SetPaymentKey("cs_lock", Payment{
+		InviteCode:          "invite_lock",
+		InviteLockHash:      hash,
+		InviteLockCreatedAt: time.Now(),
+	})
+	invite := Invite{
+		Code:            "invite_lock",
+		RequiredPayment: true,
+		PaymentID:       "cs_lock",
+		PaymentStatus:   paymentStatusPaid,
+	}
+
+	if !app.validPaidInvitePaymentLock(invite, token) {
+		t.Fatal("expected matching payment lock token to be valid")
+	}
+	if app.validPaidInvitePaymentLock(invite, invite.Code) {
+		t.Fatal("did not expect invite code cookie to unlock a hashed payment lock")
+	}
+	if app.validPaidInvitePaymentLock(invite, "") {
+		t.Fatal("did not expect an empty payment lock token to be valid")
+	}
+}
+
+func TestPaidInvitePaymentLockAllowsLegacyCodeCookieOnlyWithoutHash(t *testing.T) {
+	app := newStripePaymentTestApp(t)
+	invite := Invite{
+		Code:            "invite_legacy",
+		RequiredPayment: true,
+		PaymentStatus:   paymentStatusPaid,
+	}
+
+	if !app.validPaidInvitePaymentLock(invite, invite.Code) {
+		t.Fatal("expected legacy invite code cookie to be valid when no hashed lock exists")
+	}
+	if app.validPaidInvitePaymentLock(invite, "wrong") {
+		t.Fatal("did not expect mismatched legacy payment lock cookie to be valid")
+	}
+}
+
 func TestStripeReconcileRecoversPaidStoreCheckout(t *testing.T) {
 	app := newStripePaymentTestApp(t)
 	summary := app.reconcileStripeCheckoutSessions("instance_test", []*stripe.CheckoutSession{
@@ -224,6 +270,13 @@ func TestStripeReconcileRecoversExistingInviteLink(t *testing.T) {
 	}
 	if payment.InviteCode != "invite_test" {
 		t.Fatalf("expected invite link to be recovered, got %q", payment.InviteCode)
+	}
+	invite, ok := app.storage.GetInvitesKey("invite_test")
+	if !ok {
+		t.Fatal("expected invite link to remain stored")
+	}
+	if invite.PaymentID != "cs_test_reconcile" || invite.PaymentStatus != paymentStatusPaid {
+		t.Fatalf("expected invite payment link to be recorded, got %+v", invite)
 	}
 }
 

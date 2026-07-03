@@ -223,6 +223,10 @@ func (app *appContext) NewUserFromInvite(gc *gin.Context) {
 		respond(402, "errorPaymentRequired", gc)
 		return
 	}
+	if invite.RequiredPayment && invite.PaymentStatus == "paid" && !app.paidInvitePaymentLockFromCookie(gc, invite) {
+		respond(403, "errorPaymentRequired", gc)
+		return
+	}
 
 	sourceType, source := invite.Source()
 
