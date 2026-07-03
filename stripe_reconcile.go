@@ -238,6 +238,16 @@ func (app *appContext) fulfillRecoveredStripeCheckout(session *stripe.CheckoutSe
 	}
 	payment, ok := app.storage.GetPaymentKey(session.ID)
 	if ok && !payment.FulfilledAt.IsZero() {
+		if app.repairStaleStorePaymentAsInvite(payment) {
+			return true
+		}
+		if shouldSendStorePaymentConfirmation(payment) {
+			expiry := time.Time{}
+			if userExpiry, ok := app.storage.GetUserExpiryKey(payment.JellyfinID); ok {
+				expiry = userExpiry.Expiry
+			}
+			app.sendStorePaymentConfirmation(payment.JellyfinID, payment.TargetEmail, payment.ID, payment.Provider, payment.Plan, expiry, payment.Recurring)
+		}
 		return true
 	}
 
@@ -277,11 +287,14 @@ func (app *appContext) fulfillRecoveredStripeCheckout(session *stripe.CheckoutSe
 		StripeIntervalCount: snapshot.StripeIntervalCount,
 	})
 	app.markPaymentFulfilled(session.ID, result)
+	if result.JellyfinID != "" && !result.Duplicate {
+		app.sendStorePaymentConfirmation(result.JellyfinID, targetEmail, session.ID, lm.Stripe, plan, result.Expiry, snapshot.Recurring)
+	}
 	if result.ShouldSendInvite {
-		app.sendPurchasedInvite(result.Invite, targetEmail, session.ID)
+		app.sendPurchasedInvite(result.Invite, targetEmail, session.ID, plan)
 	} else if result.InviteCode != "" {
 		app.markPaymentEmail(session.ID, paymentEmailDisabled, "")
-	} else if result.JellyfinID != "" {
+	} else if result.JellyfinID != "" && result.Duplicate {
 		app.markPaymentEmail(session.ID, paymentEmailNotApplicable, "")
 	}
 	return result.InviteCode != "" || result.JellyfinID != ""

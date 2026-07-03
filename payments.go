@@ -58,6 +58,7 @@ type paymentFulfillmentResult struct {
 	Invite           Invite
 	InviteCode       string
 	JellyfinID       string
+	Expiry           time.Time
 	ShouldSendInvite bool
 }
 
@@ -240,7 +241,7 @@ func (app *appContext) ResendPaymentInvite(gc *gin.Context) {
 		return
 	}
 
-	app.sendPurchasedInvite(invite, payment.TargetEmail, paymentID)
+	app.sendPurchasedInvite(invite, payment.TargetEmail, paymentID, payment.Plan)
 	gc.JSON(200, stringResponse{Response: "Invite queued"})
 }
 
@@ -446,6 +447,50 @@ func (app *appContext) markPaymentEmail(id, emailStatus, errText string) {
 	})
 }
 
+func shouldSendStorePaymentConfirmation(payment Payment) bool {
+	if payment.JellyfinID == "" || payment.TargetEmail == "" || payment.InviteCode != "" {
+		return false
+	}
+	if paymentStatusIsLifecycle(payment.Status) {
+		return false
+	}
+	switch payment.EmailStatus {
+	case paymentEmailSent, paymentEmailPending, paymentEmailDisabled, paymentEmailNotApplicable:
+		return false
+	default:
+		return true
+	}
+}
+
+func (app *appContext) repairStaleStorePaymentAsInvite(payment Payment) bool {
+	if payment.JellyfinID == "" || payment.TargetEmail == "" || payment.InviteCode != "" || paymentStatusIsLifecycle(payment.Status) {
+		return false
+	}
+	if app.jf.MediaBrowser == nil {
+		return false
+	}
+	if _, err := app.jf.UserByID(payment.JellyfinID, false); err == nil {
+		return false
+	}
+
+	app.info.Printf("Repairing Stripe payment %s for %q: stored Jellyfin user %q no longer exists", payment.ID, payment.TargetEmail, payment.JellyfinID)
+	app.storage.DeleteEmailsKey(payment.JellyfinID)
+	app.storage.DeleteUserExpiryKey(payment.JellyfinID)
+
+	invite := app.createPurchasedInvite(payment.Provider, payment.TargetEmail, payment.Plan, payment.Profile, payment.ID, payment.AccessMonths, payment.AccessDays)
+	app.setPayment(payment.ID, func(payment *Payment) {
+		payment.JellyfinID = ""
+		payment.InviteCode = invite.Code
+		payment.Error = ""
+	})
+	if emailEnabled {
+		app.sendPurchasedInvite(invite, payment.TargetEmail, payment.ID, payment.Plan)
+	} else {
+		app.markPaymentEmail(payment.ID, paymentEmailDisabled, "")
+	}
+	return true
+}
+
 func (app *appContext) markPaymentError(id, errText string) {
 	app.setPayment(id, func(payment *Payment) {
 		setPaymentLifecycleStatus(payment, paymentStatusFailed, errText)
@@ -532,6 +577,16 @@ func (app *appContext) fulfillStorePayment(f paymentFulfillment) paymentFulfillm
 
 	existingUserID, existingEmail, found := app.findUserByEmail(f.TargetEmail)
 	if found {
+		if app.jf.MediaBrowser != nil {
+			if _, err := app.jf.UserByID(existingUserID, false); err != nil {
+				app.info.Printf("Ignoring stale email mapping for %q to missing Jellyfin user %q: %v", f.TargetEmail, existingUserID, err)
+				app.storage.DeleteEmailsKey(existingUserID)
+				app.storage.DeleteUserExpiryKey(existingUserID)
+				found = false
+			}
+		}
+	}
+	if found {
 		app.info.Printf(lm.ExistingUserFound, f.TargetEmail, existingUserID)
 		if f.SubscriptionID != "" {
 			existingEmail.Label = f.Provider + " Subscription: " + f.SubscriptionID
@@ -543,11 +598,11 @@ func (app *appContext) fulfillStorePayment(f paymentFulfillment) paymentFulfillm
 		newExpiry, changed := app.extendPaidUserExpiry(existingUserID, f.TransactionID, f.Plan, f.AccessMonths, f.AccessDays)
 		if !changed {
 			app.info.Printf(lm.PaymentTransactionAlreadyProcessed, f.Provider, f.TransactionID, existingUserID)
-			return paymentFulfillmentResult{Duplicate: true, JellyfinID: existingUserID}
+			return paymentFulfillmentResult{Duplicate: true, JellyfinID: existingUserID, Expiry: newExpiry}
 		}
 		app.reEnablePaidUser(existingUserID)
 		app.info.Printf(lm.UserReactivated, existingUserID, newExpiry)
-		return paymentFulfillmentResult{JellyfinID: existingUserID}
+		return paymentFulfillmentResult{JellyfinID: existingUserID, Expiry: newExpiry}
 	}
 
 	if f.TransactionID != "" {
@@ -614,7 +669,11 @@ func (app *appContext) expirePaidUserNow(userID string) {
 func (app *appContext) createPurchasedInvite(provider, targetEmail, plan, profile, transactionID string, accessMonths, accessDays int) Invite {
 	if _, ok := app.storage.GetProfileKey(profile); !ok {
 		app.debug.Printf(lm.FailedGetProfile, profile)
-		profile = paymentDefaultProfile
+		if _, ok := app.storage.GetProfileKey(paymentDefaultProfile); ok {
+			profile = paymentDefaultProfile
+		} else {
+			profile = ""
+		}
 	}
 
 	inviteCode := GenerateInviteCode()
@@ -645,13 +704,13 @@ func (app *appContext) createPurchasedInvite(provider, targetEmail, plan, profil
 	return invite
 }
 
-func (app *appContext) sendPurchasedInvite(invite Invite, targetEmail, paymentID string) {
+func (app *appContext) sendPurchasedInvite(invite Invite, targetEmail, paymentID, plan string) {
 	if paymentID != "" {
 		app.markPaymentEmail(paymentID, paymentEmailPending, "")
 	}
 
 	go func() {
-		msg, err := app.email.constructInvite(&invite, false)
+		msg, err := app.email.constructPurchasedInvite(&invite, plan, false)
 		if err != nil {
 			app.err.Printf(lm.FailedConstructInviteMessage, targetEmail, err)
 			if paymentID != "" {
@@ -671,4 +730,69 @@ func (app *appContext) sendPurchasedInvite(invite Invite, targetEmail, paymentID
 			}
 		}
 	}()
+}
+
+func (app *appContext) sendStorePaymentConfirmation(userID, targetEmail, paymentID, provider, plan string, expiry time.Time, recurring bool) {
+	if paymentID == "" || targetEmail == "" {
+		return
+	}
+	if !emailEnabled {
+		app.markPaymentEmail(paymentID, paymentEmailDisabled, "")
+		return
+	}
+	if app.email == nil || app.email.sender == nil {
+		app.markPaymentEmail(paymentID, paymentEmailFailed, "email sender is not configured")
+		return
+	}
+
+	app.markPaymentEmail(paymentID, paymentEmailPending, "")
+	go func() {
+		username := targetEmail
+		if userID != "" && app.jf.MediaBrowser != nil {
+			if user, err := app.jf.UserByID(userID, false); err == nil && user.Name != "" {
+				username = user.Name
+			}
+		}
+
+		msg := app.constructStorePaymentConfirmationMessage(username, provider, plan, expiry, recurring)
+		if err := app.email.send(msg, targetEmail); err != nil {
+			app.err.Printf("Failed to send %s payment confirmation email for %s to %s: %v", provider, paymentID, targetEmail, err)
+			app.markPaymentEmail(paymentID, paymentEmailFailed, err.Error())
+			return
+		}
+		app.info.Printf("Sent %s payment confirmation email for %s to %s", provider, paymentID, targetEmail)
+		app.markPaymentEmail(paymentID, paymentEmailSent, "")
+	}()
+}
+
+func (app *appContext) constructStorePaymentConfirmationMessage(username, provider, plan string, expiry time.Time, recurring bool) *Message {
+	serverName := serverHeader(app.config, nil)
+	if plan == "" {
+		plan = "access"
+	}
+	if provider == "" {
+		provider = "payment"
+	}
+
+	lines := []string{
+		"Hi " + username + ",",
+		"",
+		"Your " + serverName + " subscription is active.",
+		"Plan: " + plan,
+	}
+	if !expiry.IsZero() {
+		lines = append(lines, "Paid through: "+formatDatetime(expiry))
+	}
+	if recurring {
+		lines = append(lines, "Future renewals will be handled by "+provider+".")
+	}
+	if accountURL := strings.TrimRight(ExternalURI(nil), "/") + PAGES.MyAccount; accountURL != "" && PAGES.MyAccount != "" && PAGES.MyAccount != "disabled" {
+		lines = append(lines, "", "Manage your account: "+accountURL)
+	}
+	lines = append(lines, "", "If you did not make this purchase, contact the administrator.")
+
+	return &Message{
+		Subject: "Subscription active - " + serverName,
+		Text:    strings.Join(lines, "\n"),
+	}
 }

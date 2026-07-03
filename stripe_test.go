@@ -326,6 +326,44 @@ func TestStripeRefundOverridesEmailFailure(t *testing.T) {
 	}
 }
 
+func TestStorePaymentConfirmationEligibility(t *testing.T) {
+	base := Payment{
+		ID:          "cs_existing",
+		JellyfinID:  "jf_user",
+		TargetEmail: "test@example.com",
+		Status:      paymentStatusFulfilled,
+		EmailStatus: paymentEmailNotStarted,
+	}
+
+	if !shouldSendStorePaymentConfirmation(base) {
+		t.Fatal("expected fulfilled existing-user payment to be eligible for confirmation")
+	}
+
+	for name, mutate := range map[string]func(*Payment){
+		"invite payment": func(p *Payment) { p.InviteCode = "invite_test" },
+		"missing user": func(p *Payment) {
+			p.JellyfinID = ""
+		},
+		"already sent": func(p *Payment) {
+			p.EmailStatus = paymentEmailSent
+		},
+		"pending": func(p *Payment) {
+			p.EmailStatus = paymentEmailPending
+		},
+		"canceled": func(p *Payment) {
+			p.Status = paymentStatusSubscriptionCanceled
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payment := base
+			mutate(&payment)
+			if shouldSendStorePaymentConfirmation(payment) {
+				t.Fatalf("did not expect %s to be eligible", name)
+			}
+		})
+	}
+}
+
 func TestStripePartialRefundIsVisible(t *testing.T) {
 	payment := Payment{
 		Amount: 200,

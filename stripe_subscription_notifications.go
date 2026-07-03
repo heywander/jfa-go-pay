@@ -2,21 +2,24 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stripe/stripe-go/v86"
 )
 
+var stripeSubscriptionCancellationNotifyMu sync.Mutex
+
 func (app *appContext) notifyStripeSubscriptionCancellation(sub *stripe.Subscription, source string) {
 	if sub == nil || sub.ID == "" || !emailEnabled || app.email == nil || app.email.sender == nil {
-		return
-	}
-	if app.stripeSubscriptionCancellationNotified(sub.ID) {
 		return
 	}
 
 	targetEmail := stripeSubscriptionTargetEmail(sub, app)
 	if targetEmail == "" {
+		return
+	}
+	if !app.reserveStripeSubscriptionCancellationNotification(sub.ID) {
 		return
 	}
 
@@ -30,11 +33,11 @@ func (app *appContext) notifyStripeSubscriptionCancellation(sub *stripe.Subscrip
 
 	msg := app.constructStripeSubscriptionCancellationMessage(username, userID, sub, source)
 	if err := app.email.send(msg, targetEmail); err != nil {
+		app.clearStripeSubscriptionCancellationNotified(sub.ID)
 		app.err.Printf("Failed to send Stripe subscription cancellation email for %s to %s: %v", sub.ID, targetEmail, err)
 		return
 	}
 
-	app.markStripeSubscriptionCancellationNotified(sub.ID)
 	app.info.Printf("Sent Stripe subscription cancellation email for %s to %s", sub.ID, targetEmail)
 }
 
@@ -96,11 +99,29 @@ func (app *appContext) stripeSubscriptionCancellationNotified(subscriptionID str
 	return false
 }
 
-func (app *appContext) markStripeSubscriptionCancellationNotified(subscriptionID string) {
+func (app *appContext) reserveStripeSubscriptionCancellationNotification(subscriptionID string) bool {
+	stripeSubscriptionCancellationNotifyMu.Lock()
+	defer stripeSubscriptionCancellationNotifyMu.Unlock()
+
+	if app.stripeSubscriptionCancellationNotified(subscriptionID) {
+		return false
+	}
 	now := time.Now()
+	marked := false
 	app.setPaymentsByStripeIDs("", "", "", subscriptionID, func(payment *Payment) {
 		if payment.SubscriptionCancelNotifiedAt.IsZero() {
 			payment.SubscriptionCancelNotifiedAt = now
+			marked = true
 		}
+	})
+	return marked
+}
+
+func (app *appContext) clearStripeSubscriptionCancellationNotified(subscriptionID string) {
+	stripeSubscriptionCancellationNotifyMu.Lock()
+	defer stripeSubscriptionCancellationNotifyMu.Unlock()
+
+	app.setPaymentsByStripeIDs("", "", "", subscriptionID, func(payment *Payment) {
+		payment.SubscriptionCancelNotifiedAt = time.Time{}
 	})
 }

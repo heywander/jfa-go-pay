@@ -1336,6 +1336,23 @@ sections:
     depends_true: enabled
     type: text
     description: Subject of invite emails.
+  - setting: purchased_email_html
+    name: Purchased invite email (HTML)
+    advanced: true
+    depends_true: enabled
+    type: text
+    description: Path to custom purchased invite email HTML.
+  - setting: purchased_email_text
+    name: Purchased invite email (plaintext)
+    advanced: true
+    depends_true: enabled
+    type: text
+    description: Path to custom purchased invite email in plain text.
+  - setting: purchased_subject
+    name: Purchased invite subject
+    depends_true: enabled
+    type: text
+    description: Subject of purchased invite emails.
   - setting: url_base
     name: External jfa-go URL
     required: true

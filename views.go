@@ -705,15 +705,7 @@ func (app *appContext) NewUserFromConfirmationKey(invite Invite, key string, lan
 
 	sourceType, source := invite.Source()
 
-	var profile *Profile = nil
-	if invite.Profile != "" {
-		p, ok := app.storage.GetProfileKey(invite.Profile)
-		if !ok {
-			app.debug.Printf(lm.FailedGetProfile+lm.FallbackToDefault, invite.Profile)
-			p = app.storage.GetDefaultProfile()
-		}
-		profile = &p
-	}
+	profile := app.profileForInvite(invite.Profile)
 
 	// FIXME: Email and contract method linking?????
 

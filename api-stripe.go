@@ -293,8 +293,11 @@ func (app *appContext) handleStripeCheckoutCompleted(event *stripe.Event) {
 		StripeIntervalCount: snapshot.StripeIntervalCount,
 	})
 	app.markPaymentFulfilled(session.ID, result)
+	if result.JellyfinID != "" && !result.Duplicate {
+		app.sendStorePaymentConfirmation(result.JellyfinID, targetEmail, session.ID, lm.Stripe, plan, result.Expiry, snapshot.Recurring)
+	}
 	if result.ShouldSendInvite {
-		app.sendPurchasedInvite(result.Invite, targetEmail, session.ID)
+		app.sendPurchasedInvite(result.Invite, targetEmail, session.ID, plan)
 	} else if result.InviteCode != "" {
 		app.markPaymentEmail(session.ID, paymentEmailDisabled, "")
 	}
@@ -385,6 +388,7 @@ func (app *appContext) handleStripeInvoiceSucceeded(event *stripe.Event) {
 	}
 	app.reEnablePaidUser(userID)
 	app.markPaymentFulfilled(invoice.ID, paymentFulfillmentResult{JellyfinID: userID})
+	app.sendStorePaymentConfirmation(userID, email, invoice.ID, lm.Stripe, planSnapshot.Name, newExpiry, planSnapshot.Recurring)
 
 	app.info.Printf(lm.UserExpiryExtended, userID, email, newExpiry)
 }
