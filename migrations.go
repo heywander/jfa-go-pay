@@ -375,6 +375,9 @@ func intialiseCustomContent(app *appContext) {
 	if _, ok := app.storage.GetCustomContentKey("InviteEmail"); !ok {
 		app.storage.SetCustomContentKey("InviteEmail", emptyCC)
 	}
+	if _, ok := app.storage.GetCustomContentKey("PurchasedInviteEmail"); !ok {
+		app.storage.SetCustomContentKey("PurchasedInviteEmail", emptyCC)
+	}
 	if _, ok := app.storage.GetCustomContentKey("WelcomeEmail"); !ok {
 		app.storage.SetCustomContentKey("WelcomeEmail", emptyCC)
 	}
