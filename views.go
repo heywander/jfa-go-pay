@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,27 @@ import (
 var cssVersion string
 var css = []string{cssVersion + "bundle.css", "remixicon.css"}
 var cssHeader string
+
+func loadCSSVersionFallback() {
+	if cssVersion == "" {
+		entries, err := fs.ReadDir(localFS, "web/css")
+		if err == nil {
+			versions := []string{}
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.IsDir() || !strings.HasSuffix(name, "bundle.css") || name == "bundle.css" {
+					continue
+				}
+				versions = append(versions, strings.TrimSuffix(name, "bundle.css"))
+			}
+			if len(versions) > 0 {
+				sort.Strings(versions)
+				cssVersion = versions[len(versions)-1]
+			}
+		}
+	}
+	css = []string{cssVersion + "bundle.css", "remixicon.css"}
+}
 
 func (app *appContext) loadCSSHeader() string {
 	l := len(css)

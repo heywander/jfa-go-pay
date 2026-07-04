@@ -638,6 +638,7 @@ func start(asDaemon, firstCall bool) {
 		}
 	}
 
+	loadCSSVersionFallback()
 	cssHeader = app.loadCSSHeader()
 	// workaround for potentially broken windows mime types
 	mime.AddExtensionType(".js", "application/javascript")
