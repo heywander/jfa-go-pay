@@ -529,7 +529,7 @@ type TaskDTO struct {
 }
 
 type LabelsDTO struct {
-	Labels []string `json:'labels"`
+	Labels []string `json:"labels"`
 }
 
 type ActivityLogEntriesDTO struct {
